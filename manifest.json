@@ -1,0 +1,93 @@
+{
+  "dxt_version": "0.1",
+  "name": "capacities-mcp-server",
+  "display_name": "Capacities MCP Server",
+  "version": "1.0.0",
+  "description": "Advanced Capacities knowledge management integration with search, content creation, and analysis tools",
+  "author": {
+    "name": "Tom Booth",
+    "email": "tom@inconceivablelabs.com"
+  },
+  "homepage": "https://github.com/inconceivablelabs/capacitiesMCP",
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "server/dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/dist/index.js"],
+      "env": {
+        "CAPACITIES_API_TOKEN": "${user_config.capacities_api_token}",
+        "CAPACITIES_API_BASE_URL": "${user_config.capacities_api_base_url}",
+        "LOG_LEVEL": "${user_config.log_level}"
+      }
+    }
+  },
+  "user_config": {
+    "capacities_api_token": {
+      "type": "string",
+      "title": "Capacities API Token",
+      "description": "Your Capacities API token (get from Capacities Desktop App → Settings → API)",
+      "required": true
+    },
+    "capacities_api_base_url": {
+      "type": "string",
+      "title": "Capacities API Base URL",
+      "description": "Capacities API base URL",
+      "required": false,
+      "default": "https://api.capacities.io"
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log Level",
+      "description": "Logging level for debugging",
+      "required": false,
+      "default": "info"
+    }
+  },
+  "tools": [
+    {
+      "name": "search_content",
+      "description": "Search for content across your Capacities spaces using keywords"
+    },
+    {
+      "name": "list_spaces", 
+      "description": "Get a list of all your Capacities spaces"
+    },
+    {
+      "name": "get_space_info",
+      "description": "Get detailed information about a specific Capacities space"
+    },
+    {
+      "name": "create_structured_note",
+      "description": "Create structured note templates (meeting, daily-reflection, task-list, research)"
+    },
+    {
+      "name": "smart_search",
+      "description": "Intelligent search with context awareness and related content"
+    },
+    {
+      "name": "advanced_search", 
+      "description": "Search with date ranges, object types, and other filters"
+    },
+    {
+      "name": "analyze_content_patterns",
+      "description": "Analyze patterns in your Capacities content"
+    },
+    {
+      "name": "identify_knowledge_gaps",
+      "description": "Find topics that might be missing or underdeveloped"
+    }
+  ],
+  "resources": [
+    {
+      "name": "spaces",
+      "uri": "capacities://spaces",
+      "description": "List of all your Capacities spaces"
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.12.0",
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

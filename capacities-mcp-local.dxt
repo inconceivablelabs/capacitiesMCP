@@ -1,0 +1,83 @@
+{
+  "name": "Capacities MCP Server (Local Development)",
+  "description": "Advanced Capacities knowledge management integration - for local development setup",
+  "version": "1.0.0",
+  "author": "Tom Booth",
+  "homepage": "https://github.com/inconceivablelabs/capacitiesMCP",
+  "mcpServers": {
+    "capacities": {
+      "command": "npm",
+      "args": ["run", "start"],
+      "env": {
+        "CAPACITIES_API_TOKEN": "${CAPACITIES_API_TOKEN}",
+        "CAPACITIES_API_BASE_URL": "https://api.capacities.io",
+        "LOG_LEVEL": "info"
+      }
+    }
+  },
+  "envVariables": {
+    "CAPACITIES_API_TOKEN": {
+      "description": "Your Capacities API token (get from Capacities Desktop App → Settings → API)",
+      "required": true,
+      "type": "string"
+    }
+  },
+  "tools": [
+    {
+      "name": "search_content",
+      "description": "Search for content across your Capacities spaces using keywords"
+    },
+    {
+      "name": "list_spaces", 
+      "description": "Get a list of all your Capacities spaces"
+    },
+    {
+      "name": "get_space_info",
+      "description": "Get detailed information about a specific Capacities space"
+    },
+    {
+      "name": "create_structured_note",
+      "description": "Create structured note templates (meeting, daily-reflection, task-list, research)"
+    },
+    {
+      "name": "smart_search",
+      "description": "Intelligent search with context awareness and related content"
+    },
+    {
+      "name": "advanced_search", 
+      "description": "Search with date ranges, object types, and other filters"
+    },
+    {
+      "name": "analyze_content_patterns",
+      "description": "Analyze patterns in your Capacities content"
+    },
+    {
+      "name": "identify_knowledge_gaps",
+      "description": "Find topics that might be missing or underdeveloped"
+    }
+  ],
+  "resources": [
+    {
+      "name": "spaces",
+      "uri": "capacities://spaces",
+      "description": "List of all your Capacities spaces"
+    }
+  ],
+  "installation": {
+    "steps": [
+      "1. Get your Capacities API token from Capacities Desktop App → Settings → API",
+      "2. Clone this repository: git clone https://github.com/inconceivablelabs/capacitiesMCP.git",
+      "3. Navigate to project directory: cd capacitiesMCP",
+      "4. Install dependencies: npm install",
+      "5. Build the project: npm run build",
+      "6. Import this DXT file into Claude Desktop (from the project directory)",
+      "7. Enter your API token when prompted"
+    ],
+    "requirements": [
+      "Node.js 18 or higher",
+      "Capacities account with API access",
+      "Capacities Desktop App",
+      "Git (for cloning the repository)"
+    ]
+  }
+}

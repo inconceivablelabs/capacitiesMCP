@@ -1,0 +1,87 @@
+{
+  "name": "Capacities MCP Server",
+  "description": "Advanced Capacities knowledge management integration with search, content creation, and analysis tools",
+  "version": "1.0.0",
+  "author": "Tom Booth",
+  "homepage": "https://github.com/inconceivablelabs/capacitiesMCP",
+  "mcpServers": {
+    "capacities": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "cwd": "${PROJECT_PATH}",
+      "env": {
+        "CAPACITIES_API_TOKEN": "${CAPACITIES_API_TOKEN}",
+        "CAPACITIES_API_BASE_URL": "https://api.capacities.io",
+        "LOG_LEVEL": "info"
+      }
+    }
+  },
+  "envVariables": {
+    "CAPACITIES_API_TOKEN": {
+      "description": "Your Capacities API token (get from Capacities Desktop App → Settings → API)",
+      "required": true,
+      "type": "string"
+    },
+    "PROJECT_PATH": {
+      "description": "Full path to the capacitiesMCP project directory (e.g., C:\\Users\\YourName\\capacitiesMCP)",
+      "required": true,
+      "type": "string"
+    }
+  },
+  "tools": [
+    {
+      "name": "search_content",
+      "description": "Search for content across your Capacities spaces using keywords"
+    },
+    {
+      "name": "list_spaces", 
+      "description": "Get a list of all your Capacities spaces"
+    },
+    {
+      "name": "get_space_info",
+      "description": "Get detailed information about a specific Capacities space"
+    },
+    {
+      "name": "create_structured_note",
+      "description": "Create structured note templates (meeting, daily-reflection, task-list, research)"
+    },
+    {
+      "name": "smart_search",
+      "description": "Intelligent search with context awareness and related content"
+    },
+    {
+      "name": "advanced_search", 
+      "description": "Search with date ranges, object types, and other filters"
+    },
+    {
+      "name": "analyze_content_patterns",
+      "description": "Analyze patterns in your Capacities content"
+    },
+    {
+      "name": "identify_knowledge_gaps",
+      "description": "Find topics that might be missing or underdeveloped"
+    }
+  ],
+  "resources": [
+    {
+      "name": "spaces",
+      "uri": "capacities://spaces",
+      "description": "List of all your Capacities spaces"
+    }
+  ],
+  "installation": {
+    "steps": [
+      "1. Get your Capacities API token from Capacities Desktop App → Settings → API",
+      "2. Clone or download this repository to your local machine",
+      "3. Run 'npm install' in the project directory",
+      "4. Run 'npm run build' to compile the TypeScript code",
+      "5. Import this DXT file into Claude Desktop",
+      "6. Enter your API token and the full path to the project directory when prompted"
+    ],
+    "requirements": [
+      "Node.js 18 or higher",
+      "Capacities account with API access",
+      "Capacities Desktop App"
+    ]
+  }
+}
