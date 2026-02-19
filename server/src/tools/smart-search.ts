@@ -26,8 +26,7 @@ export function setupSmartSearchTools(server: McpServer, client: CapacitiesClien
         const searchPromises = expandedQueries.map(expandedQuery =>
           client.searchContent({
             query: expandedQuery,
-            spaceIds: spaces.map(s => s.id),
-            mode: "fullText"
+            spaceIds: spaces.map(s => s.id)
           })
         );
         
@@ -89,9 +88,7 @@ export function setupSmartSearchTools(server: McpServer, client: CapacitiesClien
         
         let results = await client.searchContent({
           query,
-          spaceIds: searchSpaces,
-          mode: "fullText",
-          structureIds: objectTypes
+          spaceIds: searchSpaces
         });
         
         // Apply additional filters (when API supports them)
@@ -181,27 +178,24 @@ function calculateRelevanceScore(result: any, query: string): number {
   let score = 0;
   const queryLower = query.toLowerCase();
   const titleLower = result.title.toLowerCase();
-  
-  // Title match bonus
-  if (titleLower.includes(queryLower)) {
+
+  // Exact title match
+  if (titleLower === queryLower) {
+    score += 30;
+  }
+  // Partial title match
+  else if (titleLower.includes(queryLower)) {
     score += 10;
   }
-  
-  // Exact title match super bonus
-  if (titleLower === queryLower) {
-    score += 20;
+
+  // Bonus for each query word found in the title
+  const queryWords = queryLower.split(/\s+/);
+  for (const word of queryWords) {
+    if (titleLower.includes(word)) {
+      score += 2;
+    }
   }
-  
-  // Highlight count
-  score += result.highlights.length * 2;
-  
-  // Snippet relevance
-  for (const highlight of result.highlights) {
-    score += highlight.snippets.filter((snippet: string) => 
-      snippet.toLowerCase().includes(queryLower)
-    ).length;
-  }
-  
+
   return score;
 }
 
@@ -214,10 +208,10 @@ async function findRelatedContent(topResults: any[], client: CapacitiesClient): 
       // Extract key terms from title for related search
       const keyTerms = extractKeyTerms(result.title);
       if (keyTerms.length > 0) {
+        if (!result.spaceId) continue;
         const relatedResults = await client.searchContent({
           query: keyTerms.join(" "),
-          spaceIds: [result.spaceId],
-          mode: "fullText"
+          spaceIds: [result.spaceId]
         });
         
         // Filter out the original result and add new ones
@@ -289,7 +283,7 @@ function sortResults(results: any[], sortBy: "relevance" | "date" | "title"): an
         return 0;
       case "relevance":
       default:
-        return b.highlights.length - a.highlights.length;
+        return a.title.localeCompare(b.title);
     }
   });
 }
@@ -302,14 +296,8 @@ function formatSmartSearchResults(results: any[], query: string): string {
   let output = `🔍 Smart Search Results for "${query}" (${results.length} found)\n\n`;
   
   results.forEach((result, index) => {
-    const snippets = result.highlights
-      .map((h: any) => h.snippets.join(" "))
-      .join("\n")
-      .substring(0, 200) + "...";
-    
     output += `${index + 1}. **${result.title}**\n`;
     output += `   Type: ${result.structureId}\n`;
-    output += `   Preview: ${snippets}\n`;
     output += `   ID: ${result.id}\n\n`;
   });
   

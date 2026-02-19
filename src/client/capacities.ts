@@ -68,7 +68,7 @@ export class CapacitiesClient {
   }
 
   private getEndpointType(endpoint: string): "general" | "search" | "weblink" {
-    if (endpoint.includes("/search")) return "search";
+    if (endpoint.includes("/lookup")) return "search";
     if (endpoint.includes("/save-weblink")) return "weblink";
     return "general";
   }
@@ -83,19 +83,26 @@ export class CapacitiesClient {
   }
 
   async searchContent(options: SearchOptions): Promise<SearchResult[]> {
-    const response = await this.makeRequest<{ results: SearchResult[] }>(
-      "/search", 
-      {
-        method: "POST",
-        body: JSON.stringify({
-          searchTerm: options.query,
-          spaceIds: options.spaceIds,
-          mode: options.mode || "fullText",
-          filterStructureIds: options.structureIds
-        })
-      }
-    );
-    return response.results;
+    // /lookup requires a single spaceId per request
+    const allResults: SearchResult[] = [];
+
+    for (const spaceId of options.spaceIds) {
+      const response = await this.makeRequest<{ results: SearchResult[] }>(
+        "/lookup",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            searchTerm: options.query,
+            spaceId
+          })
+        }
+      );
+      // Tag each result with the space it came from
+      const tagged = response.results.map(r => ({ ...r, spaceId }));
+      allResults.push(...tagged);
+    }
+
+    return allResults;
   }
 
   async saveWeblink(options: SaveWeblinkOptions) {
