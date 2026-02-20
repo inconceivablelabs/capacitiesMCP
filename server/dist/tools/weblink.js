@@ -1,27 +1,19 @@
+import { z } from "zod";
 import { validateUUID, validateUrl } from "../utils/validation.js";
 export function setupWebLinkTools(server, client) {
-    server.tool("save_weblink", {
+    server.registerTool("save_weblink", {
         title: "Save Weblink to Capacities",
-        description: "Save a URL as a weblink object in your Capacities space",
+        description: "Save a URL as a weblink object in your Capacities space with optional title, description, tags, and notes",
         inputSchema: {
-            type: "object",
-            properties: {
-                spaceId: { type: "string", description: "The space to save the weblink in" },
-                url: { type: "string", description: "The URL to save" },
-                title: { type: "string", description: "Custom title for the weblink" },
-                description: { type: "string", description: "Custom description" },
-                tags: {
-                    type: "array",
-                    items: { type: "string" },
-                    description: "Tags to apply to the weblink"
-                },
-                notes: { type: "string", description: "Additional notes in markdown format" }
-            },
-            required: ["spaceId", "url"]
+            space_id: z.string().describe("The space to save the weblink in"),
+            url: z.string().describe("The URL to save"),
+            title: z.string().optional().describe("Custom title for the weblink (max 500 chars)"),
+            description: z.string().optional().describe("Custom description (max 1000 chars)"),
+            tags: z.array(z.string()).optional().describe("Tags to apply to the weblink (max 30)"),
+            notes: z.string().optional().describe("Additional notes in markdown format")
         }
-    }, async ({ spaceId, url, title, description, tags, notes }) => {
-        // Validation
-        if (!validateUUID(spaceId)) {
+    }, async ({ space_id, url, title, description, tags, notes }) => {
+        if (!validateUUID(space_id)) {
             throw new Error("Invalid space ID format");
         }
         if (!validateUrl(url)) {
@@ -29,7 +21,7 @@ export function setupWebLinkTools(server, client) {
         }
         try {
             const result = await client.saveWeblink({
-                spaceId,
+                spaceId: space_id,
                 url,
                 title,
                 description,
@@ -39,7 +31,7 @@ export function setupWebLinkTools(server, client) {
             return {
                 content: [{
                         type: "text",
-                        text: `Successfully saved weblink!\n\n**Title:** ${result.title}\n**URL:** ${url}\n**ID:** ${result.id}\n**Tags:** ${result.tags.join(", ") || "None"}\n**Description:** ${result.description || "Auto-generated"}`
+                        text: `Saved weblink!\n\n**Title:** ${result.title || "(auto-generated)"}\n**URL:** ${url}\n**ID:** ${result.id}\n**Tags:** ${result.tags?.join(", ") || "None"}\n**Description:** ${result.description || "(auto-generated)"}`
                     }]
             };
         }
