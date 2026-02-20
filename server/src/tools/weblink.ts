@@ -15,7 +15,7 @@ export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
         title: z.string().optional().describe("Custom title for the weblink (max 500 chars)"),
         description: z.string().optional().describe("Custom description (max 1000 chars)"),
         tags: z.array(z.string()).optional().describe("Tags to apply to the weblink (max 30)"),
-        notes: z.string().optional().describe("Additional notes in markdown format")
+        notes: z.string().optional().describe("Additional notes in markdown format. Use actual newlines for line breaks, NOT escaped \\n characters.")
       }
     },
     async ({ space_id, url, title, description, tags, notes }) => {
