@@ -57,8 +57,7 @@ export function setupAnalysisTools(server: McpServer, client: CapacitiesClient) 
         // Search for content related to the domain
         const domainContent = await client.searchContent({
           query: domain,
-          spaceIds: [space_id],
-          mode: "fullText"
+          spaceIds: [space_id]
         });
         
         const gaps = analyzeKnowledgeGaps(domainContent, domain);
@@ -181,15 +180,14 @@ function getCommonKnowledgeAreas(domain: string): string[] {
 
 function extractCoveredAreas(content: any[]): string[] {
   const areas: string[] = [];
-  
+
   for (const item of content) {
-    const text = `${item.title} ${item.highlights.map((h: any) => h.snippets.join(' ')).join(' ')}`.toLowerCase();
-    
-    // Extract potential topic areas from content
+    const text = item.title.toLowerCase();
+    // Extract potential topic areas from title
     const words = text.match(/\b\w{4,}\b/g) || [];
     areas.push(...words);
   }
-  
+
   return [...new Set(areas)];
 }
 

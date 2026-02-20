@@ -53,7 +53,7 @@ export class CapacitiesClient {
         }
     }
     getEndpointType(endpoint) {
-        if (endpoint.includes("/search"))
+        if (endpoint.includes("/lookup"))
             return "search";
         if (endpoint.includes("/save-weblink"))
             return "weblink";
@@ -67,16 +67,21 @@ export class CapacitiesClient {
         return this.makeRequest(`/space-info?spaceid=${spaceId}`);
     }
     async searchContent(options) {
-        const response = await this.makeRequest("/search", {
-            method: "POST",
-            body: JSON.stringify({
-                searchTerm: options.query,
-                spaceIds: options.spaceIds,
-                mode: options.mode || "fullText",
-                filterStructureIds: options.structureIds
-            })
-        });
-        return response.results;
+        // /lookup requires a single spaceId per request
+        const allResults = [];
+        for (const spaceId of options.spaceIds) {
+            const response = await this.makeRequest("/lookup", {
+                method: "POST",
+                body: JSON.stringify({
+                    searchTerm: options.query,
+                    spaceId
+                })
+            });
+            // Tag each result with the space it came from
+            const tagged = response.results.map(r => ({ ...r, spaceId }));
+            allResults.push(...tagged);
+        }
+        return allResults;
     }
     async saveWeblink(options) {
         return this.makeRequest("/save-weblink", {

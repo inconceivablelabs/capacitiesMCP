@@ -9,16 +9,14 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
     "search_content",
     {
       title: "Search Capacities Content",
-      description: "Search for content across your Capacities spaces using keywords",
+      description: "Search for content across your Capacities spaces by title matching",
       inputSchema: {
         query: z.string().describe("Search query or keywords"),
-        space_id: z.string().optional().describe("Specific space to search in (optional)"),
-        mode: z.enum(["fullText", "title"]).default("fullText").describe("Search mode"),
-        objectTypes: z.array(z.string()).optional().describe("Filter by specific object types")
+        space_id: z.string().optional().describe("Specific space to search in (optional)")
       }
     },
-    async ({ query, space_id, mode, objectTypes }) => {
-      console.error("DEBUG: search_content called with:", { query, space_id, mode, objectTypes });
+    async ({ query, space_id }) => {
+      console.error("DEBUG: search_content called with:", { query, space_id });
       
       // Validation
       if (!query || typeof query !== "string") {
@@ -32,12 +30,10 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
       try {
         const spaces = await client.getSpaces();
         const searchSpaces = space_id ? [space_id] : spaces.map(s => s.id);
-        
+
         const results = await client.searchContent({
           query,
-          spaceIds: searchSpaces,
-          mode: mode || "fullText",
-          structureIds: objectTypes
+          spaceIds: searchSpaces
         });
 
         if (results.length === 0) {
@@ -50,11 +46,7 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
         }
 
         const formattedResults = results.map(result => {
-          const highlights = result.highlights
-            .map(h => h.snippets.join(" "))
-            .join("\n");
-          
-          return `**${result.title}**\nID: ${result.id}\nType: ${result.structureId}\n\nHighlights:\n${highlights}\n`;
+          return `**${result.title}**\nID: ${result.id}\nType: ${result.structureId}\n`;
         }).join("\n---\n");
 
         return {

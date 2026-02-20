@@ -33,31 +33,14 @@ export interface Collection {
 
 export interface SearchResult {
   id: string;
-  spaceId: string;
   structureId: string;
   title: string;
-  highlights: SearchHighlight[];
-}
-
-export interface SearchHighlight {
-  context: {
-    field: "title" | "description" | "properties" | "blocksContent" | "mediaContent" | "tags" | "inTextTags";
-    propertyId?: string;
-    blockId?: string;
-    location?: {
-      mediaContentType: "tweet" | "chatMessage";
-      id: string;
-    };
-  };
-  snippets: string[];
-  score?: number;
+  spaceId?: string; // Added client-side when searching across multiple spaces
 }
 
 export interface SearchOptions {
   query: string;
   spaceIds: string[];
-  mode?: "fullText" | "title";
-  structureIds?: string[];
 }
 
 export interface SaveWeblinkOptions {
