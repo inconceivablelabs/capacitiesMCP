@@ -32,7 +32,7 @@ export function setupAnalysisTools(server, client) {
         }
     });
     // Find gaps in knowledge
-    server.tool("identify_knowledge_gaps", {
+    server.registerTool("identify_knowledge_gaps", {
         title: "Identify Knowledge Gaps",
         description: "Find topics that might be missing or underdeveloped",
         inputSchema: {

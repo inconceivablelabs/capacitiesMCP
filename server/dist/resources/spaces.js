@@ -1,7 +1,6 @@
 export function setupSpaceResources(server, client) {
     // Spaces resource
-    server.registerResource("spaces", "capacities://spaces", {
-        name: "Capacities Spaces",
+    server.registerResource("Capacities Spaces", "capacities://spaces", {
         description: "List of all your Capacities spaces",
         mimeType: "application/json"
     }, async () => {

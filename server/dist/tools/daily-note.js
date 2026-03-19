@@ -1,39 +1,31 @@
+import { z } from "zod";
 import { validateUUID } from "../utils/validation.js";
 export function setupDailyNoteTools(server, client) {
-    server.tool("add_to_daily_note", {
+    server.registerTool("add_to_daily_note", {
         title: "Add to Daily Note",
-        description: "Add content to today's daily note in Capacities",
+        description: "Add content to today's daily note in Capacities. Supports markdown. Each call appends to the existing daily note.",
         inputSchema: {
-            type: "object",
-            properties: {
-                spaceId: { type: "string", description: "The space containing the daily note" },
-                content: { type: "string", description: "Content to add (supports markdown)" },
-                noTimestamp: {
-                    type: "boolean",
-                    default: false,
-                    description: "Skip adding timestamp"
-                }
-            },
-            required: ["spaceId", "content"]
+            space_id: z.string().describe("The space containing the daily note"),
+            content: z.string().describe("Content to add (supports markdown)"),
+            no_timestamp: z.boolean().default(false).describe("Skip adding timestamp to the entry")
         }
-    }, async ({ spaceId, content, noTimestamp }) => {
-        if (!validateUUID(spaceId)) {
+    }, async ({ space_id, content, no_timestamp }) => {
+        if (!validateUUID(space_id)) {
             throw new Error("Invalid space ID format");
         }
-        if (!content || typeof content !== "string") {
-            throw new Error("Content is required and must be a string");
+        if (!content.trim()) {
+            throw new Error("Content must not be empty");
         }
         try {
             await client.saveToDailyNote({
-                spaceId,
+                spaceId: space_id,
                 content,
-                noTimestamp: noTimestamp || false
+                noTimestamp: no_timestamp
             });
-            const timestamp = noTimestamp ? "" : ` with timestamp`;
             return {
                 content: [{
                         type: "text",
-                        text: `Successfully added content to today's daily note${timestamp}!\n\nContent added:\n${content}`
+                        text: `Added to today's daily note${no_timestamp ? "" : " with timestamp"}.\n\nContent:\n${content}`
                     }]
             };
         }
@@ -42,62 +34,6 @@ export function setupDailyNoteTools(server, client) {
                 content: [{
                         type: "text",
                         text: `Failed to add to daily note: ${error instanceof Error ? error.message : String(error)}`
-                    }],
-                isError: true
-            };
-        }
-    });
-    // Helper tool for creating structured entries
-    server.tool("add_task_to_daily_note", {
-        title: "Add Task to Daily Note",
-        description: "Add a task/todo item to today's daily note",
-        inputSchema: {
-            type: "object",
-            properties: {
-                spaceId: { type: "string", description: "The space containing the daily note" },
-                task: { type: "string", description: "The task description" },
-                priority: {
-                    type: "string",
-                    enum: ["low", "medium", "high"],
-                    description: "Task priority"
-                },
-                dueDate: { type: "string", description: "Due date (YYYY-MM-DD format)" }
-            },
-            required: ["spaceId", "task"]
-        }
-    }, async ({ spaceId, task, priority, dueDate }) => {
-        if (!validateUUID(spaceId)) {
-            throw new Error("Invalid space ID format");
-        }
-        if (!task || typeof task !== "string") {
-            throw new Error("Task description is required");
-        }
-        try {
-            let taskContent = `- [ ] ${task}`;
-            if (priority) {
-                const priorityEmojis = { low: "🔵", medium: "🟡", high: "🔴" };
-                taskContent += ` ${priorityEmojis[priority]}`;
-            }
-            if (dueDate) {
-                taskContent += ` (Due: ${dueDate})`;
-            }
-            await client.saveToDailyNote({
-                spaceId,
-                content: taskContent,
-                noTimestamp: false
-            });
-            return {
-                content: [{
-                        type: "text",
-                        text: `Successfully added task to daily note!\n\nTask: ${task}\nPriority: ${priority || "normal"}\nDue: ${dueDate || "not specified"}`
-                    }]
-            };
-        }
-        catch (error) {
-            return {
-                content: [{
-                        type: "text",
-                        text: `Failed to add task: ${error instanceof Error ? error.message : String(error)}`
                     }],
                 isError: true
             };

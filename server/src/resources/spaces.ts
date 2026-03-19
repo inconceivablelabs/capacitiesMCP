@@ -4,10 +4,9 @@ import { CapacitiesClient } from "../client/capacities.js";
 export function setupSpaceResources(server: McpServer, client: CapacitiesClient) {
   // Spaces resource
   server.registerResource(
-    "spaces",
+    "Capacities Spaces",
     "capacities://spaces",
     {
-      name: "Capacities Spaces",
       description: "List of all your Capacities spaces",
       mimeType: "application/json"
     },

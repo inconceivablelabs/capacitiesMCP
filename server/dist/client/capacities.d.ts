@@ -19,7 +19,7 @@ export declare class CapacitiesClient {
 }
 export declare class CapacitiesAPIError extends Error {
     code: string;
-    details?: any | undefined;
-    constructor(code: string, message: string, details?: any | undefined);
+    details?: any;
+    constructor(code: string, message: string, details?: any);
 }
 //# sourceMappingURL=capacities.d.ts.map

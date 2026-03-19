@@ -42,7 +42,7 @@ export function setupAnalysisTools(server: McpServer, client: CapacitiesClient) 
   );
 
   // Find gaps in knowledge
-  server.tool(
+  server.registerTool(
     "identify_knowledge_gaps",
     {
       title: "Identify Knowledge Gaps",
