@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development Commands
 
 ### Build and Development
-- **Build**: `npm run build` - Compiles TypeScript and makes dist/index.js executable
+- **Build**: `npm run build` - Compiles src/ to server/dist/ and makes index.js executable
 - **Development**: `npm run dev` - Watch mode compilation with TypeScript
 - **Start**: `npm run start` - Run the compiled MCP server
 - **Testing**: `npm run test` - Run Node.js built-in test runner
@@ -108,7 +108,7 @@ Configure in Claude Desktop's MCP settings:
   "mcpServers": {
     "capacities": {
       "command": "node",
-      "args": ["./dist/index.js"],
+      "args": ["./server/dist/index.js"],
       "env": {
         "CAPACITIES_API_TOKEN": "your_token_here"
       }
