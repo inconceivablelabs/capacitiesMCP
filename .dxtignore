@@ -1,0 +1,44 @@
+# Development files
+src/tools/unused/
+docs/
+.github/
+.claude/
+.env
+*.log
+
+# Build tools (not needed at runtime)
+tsconfig.json
+node_modules/typescript/
+
+# Old DXT files
+*.dxt
+
+# Git
+.git/
+.gitignore
+
+# Test files
+node_modules/*/test/
+node_modules/*/tests/
+node_modules/*/spec/
+node_modules/*/.github/
+
+# Source maps and declarations (not needed for runtime)
+server/dist/**/*.map
+server/dist/**/*.d.ts
+server/dist/**/*.d.ts.map
+
+# Documentation in node_modules
+node_modules/*/CHANGELOG.md
+node_modules/*/HISTORY.md
+node_modules/*/README.md
+node_modules/*/readme.md
+node_modules/*/Readme.md
+node_modules/*/readme.markdown
+node_modules/*/SECURITY.md
+node_modules/*/CONTRIBUTING.md
+node_modules/*/contributing.md
+node_modules/*/*.ts
+node_modules/*/.prettierrc*
+node_modules/*/.eslintrc*
+node_modules/*/eslint.config*

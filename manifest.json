@@ -77,13 +77,14 @@
     {
       "name": "identify_knowledge_gaps",
       "description": "Find topics that might be missing or underdeveloped"
-    }
-  ],
-  "resources": [
+    },
     {
-      "name": "spaces",
-      "uri": "capacities://spaces",
-      "description": "List of all your Capacities spaces"
+      "name": "save_weblink",
+      "description": "Save a URL as a weblink object with metadata and tags"
+    },
+    {
+      "name": "add_to_daily_note",
+      "description": "Add content to today's daily note"
     }
   ],
   "compatibility": {
