@@ -1,3 +1,10 @@
+FROM node:18-slim AS builder
+
+WORKDIR /build
+COPY package.json package-lock.json tsconfig.json ./
+COPY src/ src/
+RUN npm ci && npx tsc
+
 FROM node:18-slim
 
 RUN apt-get update && apt-get install -y dumb-init && rm -rf /var/lib/apt/lists/*
@@ -6,10 +13,10 @@ RUN adduser --disabled-password --gecos "" mcpuser
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY dist/ dist/
+COPY --from=builder /build/server/dist/ dist/
 
 ENV NODE_ENV=production
 ENV CAPACITIES_API_BASE_URL=https://api.capacities.io
