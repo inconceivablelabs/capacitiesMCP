@@ -96,6 +96,20 @@ The codebase uses Node.js built-in test runner. When adding tests:
 - Validate input schemas and error handling
 - Test rate limiting logic and API integration scenarios
 
+### Building the DXT Extension
+```bash
+npm run build                          # Compile src/ → server/dist/
+npx @anthropic-ai/dxt pack            # Package into .dxt (reads manifest.json + .dxtignore)
+mv capacitiesMCP.dxt capacities-desktop-extension.dxt
+```
+Note: The `@anthropic-ai/dxt` package has been renamed to `@anthropic-ai/mcpb`. Existing `.dxt` files still work.
+
+### Project Structure
+- `src/` — Single source of truth (TypeScript)
+- `server/` — Runtime packaging only (Dockerfile, package.json, dist/)
+- `tsconfig.json` — Builds `src/` directly into `server/dist/`
+- TypeScript pinned to 5.3.3 — 5.9.x OOMs in memory-constrained environments
+
 ### MCP Server Integration
 
 #### Option 1: Desktop Extension (Recommended)
