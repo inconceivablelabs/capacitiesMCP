@@ -9,7 +9,7 @@ import { setupCreationTools } from "./tools/create.js";
 import { setupAnalysisTools } from "./tools/content-analysis.js";
 import { setupSmartSearchTools } from "./tools/smart-search.js";
 import { setupDailyNoteTools } from "./tools/daily-note.js";
-// import { setupWebLinkTools } from "./tools/weblink.js";
+import { setupWebLinkTools } from "./tools/weblink.js";
 import { setupSpaceResources } from "./resources/spaces.js";
 import { validateEnvironment } from "./utils/validation.js";
 
@@ -35,7 +35,7 @@ async function main() {
   setupAnalysisTools(server, capacitiesClient);
   setupSmartSearchTools(server, capacitiesClient);
   setupDailyNoteTools(server, capacitiesClient);
-  // setupWebLinkTools(server, capacitiesClient);
+  setupWebLinkTools(server, capacitiesClient);
 
   // Setup resources
   setupSpaceResources(server, capacitiesClient);

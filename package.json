@@ -4,16 +4,16 @@
   "description": "MCP Server for Capacities knowledge management integration with advanced search, content creation, and analysis tools",
   "type": "module",
   "bin": {
-    "capacities-mcp-server": "./dist/index.js"
+    "capacities-mcp-server": "./server/dist/index.js"
   },
   "files": [
-    "dist"
+    "server/dist"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
+    "build": "tsc && chmod +x server/dist/index.js",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "inspector": "npx @modelcontextprotocol/inspector dist/index.js"
+    "start": "node server/dist/index.js",
+    "inspector": "npx @modelcontextprotocol/inspector server/dist/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -22,9 +22,18 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "typescript": "~5.3.3"
+    "typescript": "^5.3.3"
   },
-  "keywords": ["mcp", "capacities", "knowledge-management", "ai", "claude", "search", "zod", "typescript"],
+  "keywords": [
+    "mcp",
+    "capacities",
+    "knowledge-management",
+    "ai",
+    "claude",
+    "search",
+    "zod",
+    "typescript"
+  ],
   "author": "Tom Booth",
   "license": "MIT",
   "repository": {

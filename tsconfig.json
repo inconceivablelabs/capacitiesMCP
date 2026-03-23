@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "node",
-    "outDir": "./dist",
+    "outDir": "./server/dist",
     "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,

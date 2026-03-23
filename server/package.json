@@ -10,19 +10,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
-    "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "inspector": "npx @modelcontextprotocol/inspector dist/index.js"
+    "start": "node dist/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "dotenv": "^17.2.1",
     "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@types/node": "^20.11.0",
-    "typescript": "~5.3.3"
   },
   "keywords": [
     "mcp",
