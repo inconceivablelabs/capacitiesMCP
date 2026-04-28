@@ -6,3 +6,9 @@ server/node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Private journal (lives in project-internals/capacitiesMCP/journal, symlinked here)
+.private-journal
+
+# Beads (lives in project-internals/capacitiesMCP/.beads if/when initialized)
+.beads
