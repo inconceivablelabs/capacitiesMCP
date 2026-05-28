@@ -125,6 +125,9 @@ export class CapacitiesClient {
       body: JSON.stringify({
         spaceId: options.spaceId,
         mdText: options.content,
+        // Capacities added an "mcp" origin value for MCP-server saves; it sets
+        // the icon shown on the note. See api.capacities.io/openapi.json (origin enum).
+        origin: "mcp",
         noTimeStamp: options.noTimestamp || false
       })
     });
