@@ -8,8 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Build**: `npm run build` - Compiles src/ to server/dist/ and makes index.js executable
 - **Development**: `npm run dev` - Watch mode compilation with TypeScript
 - **Start**: `npm run start` - Run the compiled MCP server
-- **Testing**: `npm run test` - Run Node.js built-in test runner
 - **Inspector**: `npm run inspector` - Launch MCP Inspector for debugging tools
+
+> **No test script yet.** `package.json` defines only `build`, `dev`, `start`, and `inspector` — there is no `test` script and no test files in the repo. The build (`tsc`) is currently the only automated quality gate. See Testing Strategy below before adding tests.
 
 ### Environment Setup
 Required environment variables:
@@ -91,7 +92,7 @@ Note: Some tools may be in `src/tools/unused/` if not fully implemented.
 - MCP SDK v1.17+ with `registerTool()` and `registerResource()` methods
 
 ### Testing Strategy
-The codebase uses Node.js built-in test runner. When adding tests:
+There are no tests yet, and no `test` script in `package.json`. When adding tests, the intended approach is the Node.js built-in test runner (`node --test`); add a matching `test` script to `package.json` at that point. Coverage to aim for:
 - Test individual tools with mocked API responses
 - Validate input schemas and error handling
 - Test rate limiting logic and API integration scenarios
