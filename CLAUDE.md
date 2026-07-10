@@ -123,15 +123,32 @@ Objects have two content layers, handled differently — this is the central men
 ### Building the DXT Extension
 ```bash
 npm run build                          # Compile src/ → server/dist/
-npx @anthropic-ai/mcpb pack            # Package into .dxt (reads manifest.json + .dxtignore)
-mv capacitiesMCP.dxt capacities-desktop-extension.dxt
+npx @anthropic-ai/mcpb pack            # Package (reads manifest.json + .mcpbignore) → capacitiesMCP.mcpb
+mv capacitiesMCP.mcpb capacities-desktop-extension.dxt   # ship under the .dxt name (README links it)
 ```
-Note: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`. Existing `.dxt` files still work.
+Notes: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`; the pack tool now reads
+**`.mcpbignore`** (NOT `.dxtignore`) and outputs **`.mcpb`**. `.mcpb`/`.dxt` are the same zip
+format — Claude Desktop accepts both. The `.mcpbignore` must exclude root `node_modules/` (runtime
+deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads/`,
+`.private-journal/`, `.git/`) — otherwise they leak into the public artifact. Verify after packing:
+`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 11 tools, and the
+archive contains no `.private-journal/`/`.beads/`.
 
 ### Deployment (mcp-gateway)
-The gateway pulls `ghcr.io/inconceivablelabs/capacities-mcp:latest`, **not** the `:local` tag in
-`server.yaml`. After a local build: `docker tag capacities-mcp:local
-ghcr.io/inconceivablelabs/capacities-mcp:latest`, then restart the gateway to pick up new tools.
+The gateway spawns the child image `ghcr.io/inconceivablelabs/capacitiesmcp:latest` (note: **no
+hyphen**) with **`--pull never`** — so it uses whatever image is **local** on the host Docker
+daemon and does **not** pull from GHCR. To deploy new code:
+```bash
+npm run build
+docker build -f server/Dockerfile -t ghcr.io/inconceivablelabs/capacitiesmcp:latest .
+cd ../mcp-gateway && docker compose restart mcp-gateway   # re-reads catalog/config, respawns child
+```
+The token + tool list live in the mcp-gateway repo's `docker/config.yaml` and
+`docker/catalogs/custom-local-catalog.yaml` (real files gitignored; `.example` tracked) — **not**
+`server.yaml`. GHCR `:latest` is only refreshed when the branch merges to **main** (CI gates
+`:latest` on the default branch); because of `--pull never`, adopting a fresh GHCR image still
+needs a manual host `docker pull … :latest` + gateway restart. After redeploying, existing MCP
+clients must reconnect (`/mcp`) to see the new tool surface.
 
 ### Project Structure
 - `src/` — Single source of truth (TypeScript)

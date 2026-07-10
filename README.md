@@ -1,6 +1,12 @@
 # Capacities MCP Server
 
-An MCP server for [Capacities](https://capacities.io) — search, create content, save weblinks, and analyze your knowledge base from any MCP-compatible client.
+An MCP server for [Capacities](https://capacities.io) — search, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
+
+> **⚠️ Upgrade to 2.x.** Version **2.x runs on the Capacities v2 REST API**. Version **1.x used the
+> Capacities Beta API, which Capacities discontinues on September 1, 2026** — 1.x builds (and any
+> `.dxt` packaged before v2.0.0) will **stop working** on that date. Reinstall the current
+> `capacities-desktop-extension.dxt` (v2.x) to keep the integration working. See the
+> [Capacities API notice](https://docs.capacities.io/developer/api).
 
 ## Prerequisites
 

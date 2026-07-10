@@ -26,7 +26,7 @@ async function main() {
   // Create MCP server
   const server = new McpServer({
     name: "capacities-mcp-server",
-    version: "1.0.0"
+    version: "2.0.0"
   });
 
   // Setup tools
