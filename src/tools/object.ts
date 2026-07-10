@@ -16,6 +16,7 @@ import { z } from "zod";
 import { CapacitiesClient, CapacitiesAPIError } from "../client/capacities.js";
 import { CapacitiesStructure, PropertyDefinition } from "../client/types.js";
 import { resolveEntities } from "./resolution.js";
+import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
 
 // Scalar property types handled by the `properties` map.
 const SCALAR_TYPES = new Set(["text", "url", "number", "boolean", "date"]);
@@ -334,7 +335,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           .boolean()
           .default(false)
           .describe("Auto-create relation targets that don't already exist"),
-        body: z.string().optional().describe("Markdown body appended to the object after creation"),
+        body: z.string().optional().describe("Markdown body appended to the object after creation." + MARKDOWN_BODY_NOTE),
         collections: z.array(z.string()).optional().describe("Collection ids to add the object to")
       }
     },
@@ -484,7 +485,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           .boolean()
           .default(false)
           .describe("Auto-create relation targets that don't already exist"),
-        body: z.string().optional().describe("Markdown body appended to the object after the update"),
+        body: z.string().optional().describe("Markdown body appended to the object after the update." + MARKDOWN_BODY_NOTE),
         collections: z.array(z.string()).optional().describe("Collection ids to set on the object")
       }
     },
@@ -674,7 +675,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         "use this to add notes/body.",
       inputSchema: {
         id: z.string().describe("Id of the object to append to"),
-        markdown: z.string().describe("Markdown content to append to the object's body")
+        markdown: z.string().describe("Markdown content to append to the object's body." + MARKDOWN_BODY_NOTE)
       }
     },
     async ({ id, markdown }) => {

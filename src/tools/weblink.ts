@@ -2,18 +2,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
 import { validateUrl } from "../utils/validation.js";
+import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
 
 export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
   server.registerTool(
     "save_weblink",
     {
       title: "Save Weblink to Capacities",
-      description: "Save a URL as a weblink object in your Capacities space. Optional title/description override the auto-fetched page metadata; notes add markdown body content. To tag a weblink, use update_object afterward.",
+      description: "Save a URL as a weblink object. Optional title/description override the auto-fetched page metadata (these are the ONLY fields settable on a weblink, and only at save time — weblinks are create-only in the API). To tag or annotate a weblink, put #tag, () tasks, or [[links]] in notes; Category/Topic and other properties cannot be set via the API yet.",
       inputSchema: {
         url: z.string().describe("The URL to save"),
         title: z.string().optional().describe("Custom title overriding the auto-fetched page title (max 500 chars)"),
         description: z.string().optional().describe("Custom description overriding the auto-fetched page description (max 1000 chars)"),
-        notes: z.string().optional().describe("Additional notes in markdown format. Use actual newlines for line breaks, NOT escaped \\n characters.")
+        notes: z.string().optional().describe("Additional notes in markdown format. Use actual newlines for line breaks, NOT escaped \\n characters." + MARKDOWN_BODY_NOTE)
       }
     },
     async ({ url, title, description, notes }) => {
