@@ -9,14 +9,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Development**: `npm run dev` - Watch mode compilation with TypeScript
 - **Start**: `npm run start` - Run the compiled MCP server
 - **Inspector**: `npm run inspector` - Launch MCP Inspector for debugging tools
+- **Test**: `npm test` - Compiles `tsconfig.test.json` then runs the Node.js built-in test runner (`node --test`) over `test-dist/test/**/*.test.js`
 
-> **No test script yet.** `package.json` defines only `build`, `dev`, `start`, and `inspector` — there is no `test` script and no test files in the repo. The build (`tsc`) is currently the only automated quality gate. See Testing Strategy below before adding tests.
+The gates are `npm run build` (tsc) + `npm test`. Tests use mocked `fetch` (no live token, no network) — see `test/`.
 
 ### Environment Setup
 Required environment variables:
-- `CAPACITIES_API_TOKEN` - API token from Capacities desktop app (required)
+- `CAPACITIES_API_TOKEN` - v2 API token (`cap-api-…`) from the Capacities desktop app (required)
 - `CAPACITIES_API_BASE_URL` - API base URL (optional, defaults to https://api.capacities.io)
-- `LOG_LEVEL` - Logging level (optional, defaults to "info")
+- `LOG_LEVEL` - Logging level (optional, defaults to "info"; set `debug` to emit response-body DEBUG logs)
 
 ### Dependencies
 - **@modelcontextprotocol/sdk**: MCP protocol implementation
@@ -26,98 +27,123 @@ Required environment variables:
 
 ## Architecture Overview
 
-This is an MCP (Model Context Protocol) server that integrates Claude with Capacities knowledge management platform. The server provides tools for searching, creating content, and managing weblinks within Capacities spaces.
+This is an MCP (Model Context Protocol) server integrating Claude with the Capacities knowledge
+management platform. It runs on the **Capacities v2 REST API** (`developers.capacities.io`),
+migrated from the v1 Beta API (which sunsets **2026-09-01**). It exposes a small generic core —
+search, structure introspection, and object CRUD — and lets the LLM compose those into workflows.
+
+**v2 API essentials:**
+- Bearer `cap-api-…` token; every request sends the header `X-Capacities-Api-Version: 0.1.0`.
+- **A token is scoped to a single space.** `GET /space` is singular; search takes no `spaceId`.
+  Multi-space = multiple tokens. There is no `space_id` parameter on any tool.
 
 ### Core Components
 
 #### Client Layer (`src/client/`)
-- **CapacitiesClient**: Main API client with rate limiting and error handling
-- **Types**: TypeScript interfaces for Capacities API data structures
-- **Rate Limiting**: Built-in rate limiter respecting API limits:
-  - General endpoints: 5 requests/60s
-  - Search endpoints: 120 requests/60s  
-  - Weblink endpoints: 10 requests/60s
+- **`capacities.ts` — CapacitiesClient**: thin transport over `fetch`. Methods: `getSpaces`,
+  `getSpaceInfo`, `searchContent`, `createObject`, `updateObject`, `getObject`,
+  `getObjectMarkdown`, `appendBlocks`, `deleteObject`, `saveWeblink`, `saveToDailyNote`.
+- **`types.ts`**: interfaces for spaces, structures, property definitions (incl. `labelSet`,
+  `multiple`, `allowedStructures`), objects, and options.
+- **Rate limiting** (per 60s window, client-side): `space` 10 · `search` 30 · `object` 30 ·
+  `blocks` 30 · `object/url` (weblink) 10. When a window is exhausted the limiter **throws**
+  `CapacitiesAPIError("RATE_LIMIT_EXCEEDED", …, {retryAfterMs})` rather than silently sleeping.
 
 #### Tools Layer (`src/tools/`)
-Each file implements specific MCP tools using `server.registerTool()` with Zod schemas:
-- **search.ts**: Content search across spaces, space listing, space info retrieval
-- **create.ts**: Content creation tools (when API supports it)
-- **weblink.ts**: Save URLs as weblink objects with metadata
-- **daily-note.ts**: Add timestamped content to daily notes
-- **smart-search.ts**: Advanced search capabilities
-- **content-analysis.ts**: Content analysis and processing
-- **workflow-automation.ts**: Automated workflow tools
-
-Note: Some tools may be in `src/tools/unused/` if not fully implemented.
+- **`search.ts`**: `search_content` (title match, optional `structureIds`/`limit`),
+  `list_spaces` (the one scoped space), `get_space_info` (structures + property ids, types,
+  `writable`, label options, relation targets).
+- **`object.ts`**: `create_object`, `update_object`, `get_object`, `append_to_object`,
+  `delete_object`. Also the shared, write-free helpers `buildWrappers` + `finalizeRelationPlans`
+  used by both create and update.
+- **`resolution.ts`**: `resolveEntities` — resolves relation NAMES → object ids by title search;
+  classifies linked / unmatched / ambiguous; never guesses.
+- **`weblink.ts`**: `save_weblink` (`POST /object/url`, auto-fetch + title/description override).
+- **`daily-note.ts`**: `add_to_daily_note`.
+- **`create.ts`**: `create_structured_note` (legacy markdown-template-into-daily-note; candidate
+  to fold into `create_object`/`add_to_daily_note`).
+- **`descriptions.ts`**: `MARKDOWN_BODY_NOTE` — single-sourced body-conventions blurb reused in
+  the body-accepting tool descriptions.
 
 #### Resources Layer (`src/resources/`)
-- **spaces.ts**: Exposes Capacities spaces as MCP resources
+- **spaces.ts**: exposes the scoped Capacities space as an MCP resource.
 
 #### Utilities (`src/utils/`)
-- **validation.ts**: Input validation functions for UUIDs, URLs, markdown content, and environment variables
+- **validation.ts**: input validation (URLs, env). Note: tools no longer validate a `space_id`
+  UUID — v2 tokens are single-space.
 
-### Key Features
+### The object model (properties vs. body)
 
-#### Available MCP Tools
-1. **search_content** - Search across Capacities spaces with full-text or title search
-2. **list_spaces** - Retrieve all available Capacities spaces
-3. **get_space_info** - Get detailed space information including structures and collections
-4. **save_weblink** - Save URLs with custom metadata, tags, and notes
-5. **add_to_daily_note** - Add markdown content to today's daily note
+Objects have two content layers, handled differently — this is the central mental model:
+- **Properties** — typed fields: scalars, dates, **labels** (e.g. Status/Category), and **entity
+  relations** (tags, meeting attendees). Set via `properties`/`labels`/`relations` maps on
+  `create_object`/`update_object`, keyed by property-definition id (from `get_space_info`).
+  Relations and labels are set by **name**, resolved **strictly** (unknown name = error; pass
+  `create_missing_relations: true` to auto-create). Verified typed-wrapper shapes live in the
+  migration design doc's "Verified write reference."
+- **Body** — markdown, via `body`/`notes`/`content`/`markdown` params. Supports Capacities'
+  inline conventions: `() text` creates+links a **Task**; `#tag` creates/links a **Tag**;
+  `[[Name]]` links an **existing** object only (plain text if it doesn't exist).
 
-#### Error Handling
-- Custom `CapacitiesAPIError` class with error codes (RATE_LIMIT_EXCEEDED, AUTHENTICATION_FAILED, NOT_FOUND, API_ERROR)
-- Comprehensive input validation using custom validator functions
-- Graceful degradation with user-friendly error messages
+### Available MCP Tools
+`search_content`, `list_spaces`, `get_space_info`, `create_object`, `update_object`,
+`get_object`, `append_to_object`, `delete_object`, `save_weblink`, `add_to_daily_note`
+(+ legacy `create_structured_note`).
 
-#### Security Considerations
-- Bearer token authentication with secure environment variable storage
-- Input sanitization for markdown content
-- URL validation for weblink operations
-- UUID validation for space and structure IDs
+### Error Handling
+- `CapacitiesAPIError(code, message, details)` — codes `RATE_LIMIT_EXCEEDED`,
+  `AUTHENTICATION_FAILED`, `API_ERROR`. On any non-ok response the **HTTP body is read and
+  surfaced** in the message + `details.body`, so the LLM can self-correct on 400s.
+- `create_object`/`update_object` **validate fully before writing** (fail-before-create): all
+  input problems are returned as one error with nothing written, and relation auto-creation is
+  deferred past the problem gate so a late failure never orphans an auto-created entity.
 
-## Development Notes
+## ⚠️ Key gotchas
 
-### API Integration
-- Built around Capacities Beta API with minimal external dependencies
-- Uses Node.js native fetch for HTTP requests
-- Implements client-side rate limiting to prevent API errors
-- Handles authentication failures and provides clear error messages
+- **Media objects are CREATE-ONLY.** `MediaWebResource` (Weblink), `MediaPDF`, `MediaImage`,
+  `MediaAudio`, `MediaFile` cannot be updated via **any** endpoint — `PATCH /object` and
+  `PATCH /object/markdown` both return `400 "This object type cannot be updated via this
+  endpoint."` A weblink's only settable surface is `title`/`description` at creation
+  (`/object/url`). Tags/Category/Topic are **not settable via the API**; tag a weblink via a
+  `#tag` in its `notes`. Regular/custom objects PATCH fine. (Upstream API limit — revisit
+  `save_weblink` property support when the API allows media updates; see the object-completion
+  design doc.)
+- **Label options** come from each label property's `labelSet` (`{id,name,color}`) in
+  `get_space_info`; write a label by mapping its name → option id. `multiple` flags multi-select.
+- **`date` writes**: use `{type:"date",date:{start:<ISO>,dateResolution:"time"}}` — a full ISO
+  timestamp is reliable; `dateResolution:"day"` requires UTC-midnight aligned to the space's TZ.
+- **`update_object` REPLACES** a named property's value (it does not append); it GETs the object
+  first (media objects will fail there). Use `append_to_object` for body.
+- TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
-### Code Style
-- TypeScript with strict type checking
-- Modular architecture with clear separation of concerns
-- Comprehensive error handling at all levels
-- Zod schemas for input validation and type safety
-- MCP SDK v1.17+ with `registerTool()` and `registerResource()` methods
-
-### Testing Strategy
-There are no tests yet, and no `test` script in `package.json`. When adding tests, the intended approach is the Node.js built-in test runner (`node --test`); add a matching `test` script to `package.json` at that point. Coverage to aim for:
-- Test individual tools with mocked API responses
-- Validate input schemas and error handling
-- Test rate limiting logic and API integration scenarios
+### Design docs
+- `docs/plans/2026-07-10-capacities-v2-migration-design.md` — v2 migration + verified write reference.
+- `docs/plans/2026-07-10-object-completion-principle-design.md` — "complete the object; compose across objects" principle + the media-object constraint + docs deliverables.
 
 ### Building the DXT Extension
 ```bash
 npm run build                          # Compile src/ → server/dist/
-npx @anthropic-ai/dxt pack            # Package into .dxt (reads manifest.json + .dxtignore)
+npx @anthropic-ai/mcpb pack            # Package into .dxt (reads manifest.json + .dxtignore)
 mv capacitiesMCP.dxt capacities-desktop-extension.dxt
 ```
-Note: The `@anthropic-ai/dxt` package has been renamed to `@anthropic-ai/mcpb`. Existing `.dxt` files still work.
+Note: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`. Existing `.dxt` files still work.
+
+### Deployment (mcp-gateway)
+The gateway pulls `ghcr.io/inconceivablelabs/capacities-mcp:latest`, **not** the `:local` tag in
+`server.yaml`. After a local build: `docker tag capacities-mcp:local
+ghcr.io/inconceivablelabs/capacities-mcp:latest`, then restart the gateway to pick up new tools.
 
 ### Project Structure
 - `src/` — Single source of truth (TypeScript)
 - `server/` — Runtime packaging only (Dockerfile, package.json, dist/)
-- `tsconfig.json` — Builds `src/` directly into `server/dist/`
-- TypeScript pinned to 5.3.3 — 5.9.x OOMs in memory-constrained environments
+- `tsconfig.json` — Builds `src/` directly into `server/dist/`; `tsconfig.test.json` builds tests.
 
 ### MCP Server Integration
 
 #### Option 1: Desktop Extension (Recommended)
-Use the bundled Desktop Extension `capacities-desktop-extension.dxt` for one-click installation with all dependencies included.
+Use the bundled `capacities-desktop-extension.dxt` for one-click installation.
 
 #### Option 2: Manual Configuration
-Configure in Claude Desktop's MCP settings:
 ```json
 {
   "mcpServers": {
@@ -125,7 +151,7 @@ Configure in Claude Desktop's MCP settings:
       "command": "node",
       "args": ["./server/dist/index.js"],
       "env": {
-        "CAPACITIES_API_TOKEN": "your_token_here"
+        "CAPACITIES_API_TOKEN": "your_cap-api-_token_here"
       }
     }
   }
