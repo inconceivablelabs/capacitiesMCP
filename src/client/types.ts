@@ -24,6 +24,16 @@ export interface PropertyDefinition {
   name: string;
   type: string;
   writable: boolean;
+  // Present only for certain property types:
+  multiple?: boolean;            // label: true = multi-select
+  labelSet?: LabelOption[];      // label: the fixed selectable options
+  allowedStructures?: string[];  // entity: structure ids that may be linked
+}
+
+export interface LabelOption {
+  id: string;
+  name: string;
+  color?: string;
 }
 
 export interface Collection {

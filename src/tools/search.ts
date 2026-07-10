@@ -103,7 +103,26 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
 
         const structureList = spaceInfo.structures.map(structure => {
           const properties = structure.propertyDefinitions
-            .map(prop => `- ${prop.name} (${prop.type})${prop.writable ? "" : " [read-only]"}`)
+            .map(prop => {
+              // Base line carries the prop-def id — the tool's properties/labels/
+              // relations maps are keyed by it, so the LLM needs it to compose calls.
+              let line = `- ${prop.name} (${prop.type}, id=${prop.id})`;
+
+              // label props: surface selectable option NAMES + multi-select flag.
+              if (prop.type === "label" && prop.labelSet && prop.labelSet.length > 0) {
+                const optionNames = prop.labelSet.map(o => o.name).join(", ");
+                line += ` options: ${optionNames}`;
+                if (prop.multiple) line += " (multi-select)";
+              }
+
+              // entity props: surface the structure ids that may be linked.
+              if (prop.type === "entity" && prop.allowedStructures && prop.allowedStructures.length > 0) {
+                line += ` links: ${prop.allowedStructures.join(", ")}`;
+              }
+
+              if (!prop.writable) line += " [read-only]";
+              return line;
+            })
             .join("\n");
 
           const collections = structure.collections

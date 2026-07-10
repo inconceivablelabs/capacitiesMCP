@@ -152,6 +152,27 @@ export class CapacitiesClient {
     });
   }
 
+  // Generic create: POST /object with typed-wrapper properties (see cap-6dy.10
+  // verified write reference). Returns the full structured object.
+  async createObject(body: {
+    structureId: string;
+    properties?: Record<string, unknown>;
+    collections?: string[];
+  }): Promise<CapacitiesObject> {
+    return this.makeRequest<CapacitiesObject>("/object", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  }
+
+  // Appends markdown-converted blocks to an existing object (verified mechanism).
+  async appendBlocks(body: { id: string; markdown: string }): Promise<unknown> {
+    return this.makeRequest("/blocks/append", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  }
+
   async saveToDailyNote(options: SaveToDailyNoteOptions) {
     // v2 daily-note append returns HTTP 200 with an empty body (handled by makeRequest).
     return this.makeRequest("/blocks/daily-note/append", {

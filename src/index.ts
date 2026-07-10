@@ -8,6 +8,7 @@ import { setupSearchTools } from "./tools/search.js";
 import { setupCreationTools } from "./tools/create.js";
 import { setupDailyNoteTools } from "./tools/daily-note.js";
 import { setupWebLinkTools } from "./tools/weblink.js";
+import { setupObjectTools } from "./tools/object.js";
 import { setupSpaceResources } from "./resources/spaces.js";
 import { validateEnvironment } from "./utils/validation.js";
 
@@ -33,6 +34,7 @@ async function main() {
   setupCreationTools(server, capacitiesClient);
   setupDailyNoteTools(server, capacitiesClient);
   setupWebLinkTools(server, capacitiesClient);
+  setupObjectTools(server, capacitiesClient);
 
   // Setup resources
   setupSpaceResources(server, capacitiesClient);
