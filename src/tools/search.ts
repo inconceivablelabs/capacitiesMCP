@@ -125,7 +125,7 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
         
         const structureList = spaceInfo.structures.map(structure => {
           const properties = structure.propertyDefinitions
-            .map(prop => `- ${prop.name} (${prop.dataType})`)
+            .map(prop => `- ${prop.name} (${prop.type})${prop.writable ? "" : " [read-only]"}`)
             .join("\n");
           
           const collections = structure.collections

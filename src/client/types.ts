@@ -21,9 +21,9 @@ export interface CapacitiesStructure {
 
 export interface PropertyDefinition {
   id: string;
-  type: string;
-  dataType: string;
   name: string;
+  type: string;
+  writable: boolean;
 }
 
 export interface Collection {
@@ -35,16 +35,22 @@ export interface SearchResult {
   id: string;
   structureId: string;
   title: string;
-  spaceId?: string; // Added client-side when searching across multiple spaces
+  // v2 /objects/search no longer scopes by space; spaceId is no longer set.
+  spaceId?: string;
 }
 
 export interface SearchOptions {
   query: string;
-  spaceIds: string[];
+  // v2 search is single-space (token-scoped); spaceIds is ignored but kept
+  // for call-site compatibility.
+  spaceIds?: string[];
+  structureIds?: string[];
+  limit?: number;
 }
 
 export interface SaveWeblinkOptions {
-  spaceId: string;
+  // spaceId is ignored in v2 (token is single-space) but kept for call-site compat.
+  spaceId?: string;
   url: string;
   title?: string;
   description?: string;
@@ -53,7 +59,17 @@ export interface SaveWeblinkOptions {
 }
 
 export interface SaveToDailyNoteOptions {
-  spaceId: string;
+  // spaceId is ignored in v2 but kept for call-site compat.
+  spaceId?: string;
   content: string;
   noTimestamp?: boolean;
+}
+
+// Minimal shape of an object returned by v2 create endpoints (e.g. POST /object/url).
+export interface CapacitiesObject {
+  id: string;
+  structureId: string;
+  collections: unknown;
+  properties: Record<string, unknown>;
+  blocks: Record<string, unknown>;
 }
