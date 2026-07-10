@@ -10,7 +10,7 @@
     "server/dist"
   ],
   "scripts": {
-    "build": "tsc && chmod +x server/dist/index.js",
+    "build": "rm -rf server/dist && tsc && chmod +x server/dist/index.js",
     "dev": "tsc --watch",
     "start": "node server/dist/index.js",
     "inspector": "npx @modelcontextprotocol/inspector server/dist/index.js",
