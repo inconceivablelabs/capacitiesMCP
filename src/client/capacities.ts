@@ -165,6 +165,26 @@ export class CapacitiesClient {
     });
   }
 
+  // Reads the STRUCTURED object (typed-wrapper properties + blocks). update_object
+  // uses this to see current multi-value lists before a replace (cap-6dy.10).
+  async getObject(id: string): Promise<CapacitiesObject> {
+    return this.makeRequest<CapacitiesObject>(`/object?id=${encodeURIComponent(id)}`);
+  }
+
+  // Generic update: PATCH /object. Merges by key but REPLACES the value of any
+  // property it names (naming a multi-value prop drops its prior list). Returns
+  // the full structured object.
+  async updateObject(body: {
+    id: string;
+    properties?: Record<string, unknown>;
+    collections?: string[];
+  }): Promise<CapacitiesObject> {
+    return this.makeRequest<CapacitiesObject>("/object", {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    });
+  }
+
   // Appends markdown-converted blocks to an existing object (verified mechanism).
   async appendBlocks(body: { id: string; markdown: string }): Promise<unknown> {
     return this.makeRequest("/blocks/append", {

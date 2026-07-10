@@ -96,6 +96,13 @@ function getCreateObject() {
   return { handler: tools["create_object"].handler, client };
 }
 
+function getUpdateObject() {
+  const { server, tools } = makeServerStub();
+  const client = newClient();
+  setupObjectTools(server, client);
+  return { handler: tools["update_object"].handler, client };
+}
+
 // --- Shared structure fixture ---------------------------------------------
 
 function structuresPayload() {
@@ -165,6 +172,12 @@ function router(opts: {
   createId?: string;
   createFail?: { status: number; text: string };
   onCreate?: (body: any) => void;
+  // update_object plumbing:
+  getObject?: any; // structured object returned by GET /object?id=
+  getFail?: { status: number; text: string };
+  updateId?: string;
+  updateFail?: { status: number; text: string };
+  onUpdate?: (body: any) => void;
 }) {
   return (call: CapturedCall): RouteResponse => {
     const method = call.opts?.method ?? "GET";
@@ -175,6 +188,30 @@ function router(opts: {
       const body = JSON.parse(call.opts.body);
       const results = opts.search?.[body.query] ?? [];
       return { body: { results } };
+    }
+    // GET /object?id=… → structured object read (update_object step 1).
+    if (call.url.includes("/object?id=") && method === "GET") {
+      if (opts.getFail) {
+        return { ok: false, status: opts.getFail.status, text: opts.getFail.text };
+      }
+      return { body: opts.getObject ?? {} };
+    }
+    // PATCH /object → update.
+    if (call.url.endsWith("/object") && method === "PATCH") {
+      const body = JSON.parse(call.opts.body);
+      if (opts.onUpdate) opts.onUpdate(body);
+      if (opts.updateFail) {
+        return { ok: false, status: opts.updateFail.status, text: opts.updateFail.text };
+      }
+      return {
+        body: {
+          id: opts.updateId ?? body.id,
+          structureId: opts.getObject?.structureId ?? "RootTask",
+          collections: [],
+          properties: {},
+          blocks: {}
+        }
+      };
     }
     if (call.url.endsWith("/object") && method === "POST") {
       const body = JSON.parse(call.opts.body);
@@ -198,6 +235,17 @@ function router(opts: {
       return { status: 200, contentType: null, contentLength: "0" };
     }
     throw new Error(`unexpected call: ${method} ${call.url}`);
+  };
+}
+
+// A structured object fixture for GET /object?id=. `props` are typed wrappers.
+function objectFixture(props: Record<string, any> = {}, structureId = "RootTask") {
+  return {
+    id: "obj-1",
+    structureId,
+    collections: [],
+    properties: props,
+    blocks: {}
   };
 }
 
@@ -529,4 +577,282 @@ test("no orphan: a later validation problem aborts BEFORE any entity is auto-cre
   );
   assert.equal(posts.length, 0, "must not create the entity target before the problem gate");
   assert.equal(createBodies.length, 0);
+});
+
+// === update_object ==========================================================
+
+// --- U1. Happy path: title + scalar + label-by-name ------------------------
+
+test("update_object: PATCHes only the named props with correct wrappers", async () => {
+  const { handler } = getUpdateObject();
+  const updateBodies: any[] = [];
+  const calls = installFetch(
+    router({
+      getObject: objectFixture({}, "RootTask"),
+      onUpdate: b => updateBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    title: "Renamed Task",
+    properties: { note: "updated" },
+    labels: { status: "Done" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+
+  const patchCall = calls.find(
+    c => c.url.endsWith("/object") && c.opts.method === "PATCH"
+  );
+  assert.ok(patchCall, "PATCH /object must happen");
+  const patched = JSON.parse(patchCall!.opts.body);
+  assert.equal(patched.id, "obj-1");
+
+  const props = patched.properties;
+  assert.deepEqual(props.title, { type: "title", title: { value: "Renamed Task" } });
+  assert.deepEqual(props.note, { type: "text", text: { value: "updated" } });
+  assert.deepEqual(props.status, { type: "label", label: [{ id: "s-done", name: "Done" }] });
+  // Only the named props are present — nothing else was written.
+  assert.deepEqual(Object.keys(props).sort(), ["note", "status", "title"]);
+
+  assert.match(res.content[0].text, /Updated Task obj-1/);
+});
+
+// --- U2. Replace-audit surfaced --------------------------------------------
+
+test("update_object: replace-audit reports prior values for multi-value props", async () => {
+  const { handler } = getUpdateObject();
+  // Prior: assignee already links two people; tags already has Alpha.
+  const prior = objectFixture(
+    {
+      assignee: { type: "entity", entity: [{ id: "p-1" }, { id: "p-2" }] },
+      tags: { type: "label", label: [{ id: "t-a", name: "Alpha" }] }
+    },
+    "RootTask"
+  );
+  installFetch(
+    router({
+      getObject: prior,
+      search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] }
+    })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    relations: { assignee: "Alice" },
+    labels: { tags: ["Beta"] },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  // Entity replace-audit is a count (structured value carries ids, not titles).
+  assert.match(res.content[0].text, /replaced Assignee: 2 linked → 1 linked/);
+  // Label replace-audit shows prior option names → new.
+  assert.match(res.content[0].text, /replaced Tags: Alpha → Beta/);
+});
+
+// --- U3. Unknown / read-only property -> isError, no PATCH -----------------
+
+test("update_object: unknown property -> isError, no PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(router({ getObject: objectFixture({}, "RootTask") }));
+
+  const res = await handler({
+    id: "obj-1",
+    properties: { nope: "x" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /unknown property `nope`/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "PATCH"),
+    false,
+    "no PATCH must happen"
+  );
+});
+
+test("update_object: read-only property -> isError, no PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(router({ getObject: objectFixture({}, "RootTask") }));
+
+  const res = await handler({
+    id: "obj-1",
+    properties: { count: 5 },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /`count` is read-only/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "PATCH"),
+    false
+  );
+});
+
+// --- U4. Strict relation unmatched (create=false) -> isError, no PATCH ------
+
+test("update_object: unmatched relation with create=false -> isError, no PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(
+    router({ getObject: objectFixture({}, "RootTask"), search: { Ghost: [] } })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    relations: { assignee: "Ghost" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /unresolved `assignee` names: Ghost/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "PATCH"),
+    false
+  );
+});
+
+// --- U5a. create_missing_relations:true -> creates target then links --------
+
+test("update_object: create_missing_relations:true creates the target then links in PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const createBodies: any[] = [];
+  const updateBodies: any[] = [];
+  const calls = installFetch(
+    router({
+      getObject: objectFixture({}, "RootTask"),
+      search: { Newbie: [] },
+      onCreate: b => createBodies.push(b),
+      onUpdate: b => updateBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    relations: { assignee: "Newbie" },
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, undefined);
+
+  // Exactly one POST /object (the title-only person target).
+  const posts = calls.filter(
+    c => c.url.endsWith("/object") && c.opts.method === "POST"
+  );
+  assert.equal(posts.length, 1, "one entity create");
+  const entityCreate = createBodies.find(b => b.structureId === "person");
+  assert.ok(entityCreate);
+  assert.deepEqual(entityCreate.properties.title, {
+    type: "title",
+    title: { value: "Newbie" }
+  });
+
+  // The PATCH links the created id.
+  assert.equal(updateBodies.length, 1);
+  assert.deepEqual(updateBodies[0].properties.assignee, {
+    type: "entity",
+    entity: [{ id: "person-new" }]
+  });
+  assert.match(res.content[0].text, /Created relation targets: Newbie/);
+});
+
+// --- U5b. Regression: co-occurring problem aborts before any entity create --
+
+test("update_object: a co-occurring problem aborts BEFORE any entity is auto-created", async () => {
+  const { handler } = getUpdateObject();
+  const createBodies: any[] = [];
+  const calls = installFetch(
+    router({
+      getObject: objectFixture({}, "RootTask"),
+      search: { Ghost: [] },
+      onCreate: b => createBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    labels: { status: "Nope" }, // unknown option -> a problem
+    relations: { assignee: "Ghost" }, // unmatched -> would auto-create
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /unknown option `Nope`/);
+  // No POST /object and no PATCH /object may happen.
+  const posts = calls.filter(
+    c => c.url.endsWith("/object") && c.opts.method === "POST"
+  );
+  assert.equal(posts.length, 0, "must not create the entity target before the problem gate");
+  assert.equal(createBodies.length, 0);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "PATCH"),
+    false
+  );
+});
+
+// --- U6. GET 404 / object not found -> isError, no PATCH -------------------
+
+test("update_object: GET 404 -> isError, no PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(
+    router({ getFail: { status: 404, text: "cap_not_found: no such object" } })
+  );
+
+  const res = await handler({
+    id: "missing",
+    title: "X",
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /cap_not_found: no such object/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "PATCH"),
+    false
+  );
+});
+
+// --- U7. Body appended via /blocks/append after PATCH ----------------------
+
+test("update_object: body is appended via /blocks/append after PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(
+    router({ getObject: objectFixture({}, "RootTask") })
+  );
+
+  const res = await handler({
+    id: "obj-1",
+    title: "New Title",
+    body: "some notes",
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+
+  // PATCH happened before append.
+  const patchIdx = calls.findIndex(
+    c => c.url.endsWith("/object") && c.opts.method === "PATCH"
+  );
+  const appendIdx = calls.findIndex(c => c.url.endsWith("/blocks/append"));
+  assert.ok(patchIdx >= 0 && appendIdx >= 0);
+  assert.ok(appendIdx > patchIdx, "append must follow the PATCH");
+
+  const appendBody = JSON.parse(calls[appendIdx].opts.body);
+  assert.deepEqual(appendBody, { id: "obj-1", markdown: "some notes" });
+  assert.match(res.content[0].text, /Body: appended/);
+});
+
+// --- U8. No-op update ------------------------------------------------------
+
+test("update_object: no fields provided -> friendly no-op, no GET/PATCH", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(router({}));
+
+  const res = await handler({ id: "obj-1", create_missing_relations: false });
+
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Nothing to update/);
+  assert.equal(calls.length, 0, "no network calls for a no-op");
 });
