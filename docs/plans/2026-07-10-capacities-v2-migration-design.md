@@ -69,8 +69,9 @@ mechanism.
 
 **Capacities (system) does:**
 - Resolve `[[Name]]` / `[[collection/Name]]` to entity ids by title.
-- **Auto-create a new entity when a `[[Name]]` link does not resolve** (pollution risk — see
-  Assumptions/Constraints).
+- **Auto-create a new entity when a `[[Name]]` link does not resolve** — *intended behavior*
+  (Tom, 2026-07-10): capturing new people/tags inline is desirable; an unresolved `[[Name]]`
+  is created and linked.
 - Merge `PATCH /object/markdown` updates (only supplied frontmatter keys change).
 
 **Explicitly NOT supported (v2 API limitations):**
@@ -116,11 +117,12 @@ knows which fields exist, which take `[[]]`, and which are read-only.
 
 ## Constraints & risks
 
-1. **Auto-create on unresolved link** — a typo'd `[[Name]]` silently creates a junk entity.
-   Mitigation: document prominently; `create_object`/`update_object` tool descriptions must
-   warn the model to use names it has confirmed exist (via `search_content`) for relations,
-   or accept auto-creation intentionally. Consider a future "strict relations" option that
-   pre-resolves via search and errors on miss.
+1. **Auto-create on unresolved link is intended behavior** (Tom, 2026-07-10). An unresolved
+   `[[Name]]` is created and linked — the desired UX for capturing new people/tags inline; we
+   do **not** gate relation writes behind pre-resolution. Accepted minor tradeoff: a typo'd
+   name creates a stray entity. Optional future affordance (not in this migration): a `strict`
+   flag on `create_object`/`update_object` that pre-resolves via search and errors on miss, for
+   callers who want it.
 2. **Event linking unsupported** — documented limitation; Tom's UI-first workflow for
    event-linked meetings persists.
 3. **Read-only property types** — `number`, `boolean`, `lastUpdatedAt` (and some per-structure
