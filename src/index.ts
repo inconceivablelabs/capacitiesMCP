@@ -18,7 +18,8 @@ async function main() {
   // Initialize Capacities API client
   const capacitiesClient = new CapacitiesClient({
     apiToken: env.apiToken,
-    baseUrl: env.baseUrl
+    baseUrl: env.baseUrl,
+    logLevel: env.logLevel
   });
 
   // Create MCP server

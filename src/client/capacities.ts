@@ -6,11 +6,17 @@ export class CapacitiesClient {
   private baseUrl: string;
   private apiToken: string;
   private rateLimiter: RateLimiter;
+  private logLevel: string;
 
-  constructor(config: { apiToken: string; baseUrl: string }) {
+  constructor(config: { apiToken: string; baseUrl: string; logLevel?: string }) {
     this.baseUrl = config.baseUrl;
     this.apiToken = config.apiToken;
+    this.logLevel = config.logLevel ?? "info";
     this.rateLimiter = new RateLimiter();
+  }
+
+  private debug(...args: unknown[]) {
+    if (this.logLevel === "debug") console.error(...args);
   }
 
   private async makeRequest<T>(
@@ -33,20 +39,42 @@ export class CapacitiesClient {
     });
 
     if (!response.ok) {
+      // Read the body defensively — for v2 structured/markdown writes a 400's body
+      // is the LLM's only path to self-correct, so surface it in the error.
+      let body = "";
+      try {
+        body = await response.text();
+      } catch {
+        /* ignore */
+      }
+
       if (response.status === 429) {
-        throw new CapacitiesAPIError("RATE_LIMIT_EXCEEDED", "Rate limit exceeded");
+        const retryAfter = response.headers.get("retry-after");
+        throw new CapacitiesAPIError(
+          "RATE_LIMIT_EXCEEDED",
+          "Rate limit exceeded" + (body ? `: ${body}` : ""),
+          { status: 429, body, ...(retryAfter ? { retryAfter } : {}) }
+        );
       }
       if (response.status === 401) {
-        throw new CapacitiesAPIError("AUTHENTICATION_FAILED", "Invalid API token");
+        throw new CapacitiesAPIError(
+          "AUTHENTICATION_FAILED",
+          "Invalid API token" + (body ? `: ${body}` : ""),
+          { status: 401, body }
+        );
       }
-      throw new CapacitiesAPIError("API_ERROR", `API error: ${response.status}`);
+      throw new CapacitiesAPIError(
+        "API_ERROR",
+        `API error ${response.status}${body ? ": " + body : ""}`,
+        { status: response.status, body }
+      );
     }
 
     // Handle empty responses gracefully
     const contentType = response.headers.get('content-type');
     const contentLength = response.headers.get('content-length');
     
-    console.error("DEBUG: Response info:", {
+    this.debug("DEBUG: Response info:", {
       status: response.status,
       contentType,
       contentLength,
@@ -54,16 +82,16 @@ export class CapacitiesClient {
     });
 
     if (contentLength === '0' || !contentType?.includes('application/json')) {
-      console.error("DEBUG: Empty or non-JSON response, returning success indicator");
+      this.debug("DEBUG: Empty or non-JSON response, returning success indicator");
       return { success: true } as T;
     }
 
     try {
       const result = await response.json() as T;
-      console.error("DEBUG: Parsed JSON response:", result);
+      this.debug("DEBUG: Parsed JSON response:", result);
       return result;
     } catch (jsonError) {
-      console.error("DEBUG: JSON parsing failed:", jsonError);
+      this.debug("DEBUG: JSON parsing failed:", jsonError);
       // If JSON parsing fails but response was OK, assume success
       return { success: true } as T;
     }
@@ -164,9 +192,15 @@ class RateLimiter {
     }
 
     if (window.requests >= limit.maxRequests) {
-      const waitTime = window.resetTime - now;
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-      return this.waitForSlot(endpoint);
+      // Surface a structured "retry in Ns" error instead of silently sleeping up
+      // to 60s. Same RATE_LIMIT_EXCEEDED code as the server-429 path; the
+      // details.retryAfterMs distinguishes the client-side preemptive case.
+      const retryAfterMs = window.resetTime - now;
+      throw new CapacitiesAPIError(
+        "RATE_LIMIT_EXCEEDED",
+        `Rate limited on ${endpoint} requests; retry in ${Math.ceil(retryAfterMs / 1000)}s`,
+        { retryAfterMs, category: endpoint }
+      );
     }
 
     window.requests++;

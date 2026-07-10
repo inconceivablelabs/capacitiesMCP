@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CapacitiesClient } from "../src/client/capacities.js";
+import { CapacitiesClient, CapacitiesAPIError } from "../src/client/capacities.js";
 
 // --- Mock fetch plumbing -------------------------------------------------
 
@@ -291,4 +291,117 @@ test("rate limiter enforces the v2 per-category limits", async () => {
   assert.equal(limits.weblink.maxRequests, 10);
   assert.equal(limits.object.maxRequests, 30);
   assert.equal(limits.blocks.maxRequests, 30);
+});
+
+// --- error body surfacing (cap-6dy.8) ------------------------------------
+
+test("makeRequest surfaces a non-ok body as API_ERROR with body in message and details", async () => {
+  installFetch(() =>
+    makeResponse({ ok: false, status: 400, text: "validation: unknown property foo" })
+  );
+  const client = newClient();
+
+  const err = await client.searchContent({ query: "x" }).then(
+    () => { throw new Error("expected rejection"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "API_ERROR");
+  assert.ok(err.message.includes("validation: unknown property foo"));
+  assert.equal(err.details.body, "validation: unknown property foo");
+  assert.equal(err.details.status, 400);
+});
+
+test("makeRequest maps 401 to AUTHENTICATION_FAILED with body", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 401, text: "bad token" }));
+  const client = newClient();
+
+  const err = await client.getSpaces().then(
+    () => { throw new Error("expected rejection"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "AUTHENTICATION_FAILED");
+  assert.ok(err.message.includes("bad token"));
+  assert.equal(err.details.body, "bad token");
+});
+
+test("makeRequest maps server 429 to RATE_LIMIT_EXCEEDED", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 429, text: "slow down" }));
+  const client = newClient();
+
+  const err = await client.getSpaces().then(
+    () => { throw new Error("expected rejection"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(err.details.status, 429);
+});
+
+// --- client-side rate limiter throws (cap-6dy.8) -------------------------
+
+test("client-side rate limiter throws RATE_LIMIT_EXCEEDED (with retryAfterMs) instead of sleeping", async () => {
+  const space = { id: "s1", title: "Space", icon: { type: "emoji", val: "x" } };
+  installFetch(() => makeResponse({ body: space }));
+  const client = newClient();
+
+  // /space -> "space" category, limit 10. First 10 succeed.
+  for (let i = 0; i < 10; i++) {
+    await client.getSpaces();
+  }
+
+  const err = await client.getSpaces().then(
+    () => { throw new Error("expected rejection on 11th call"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(typeof err.details.retryAfterMs, "number");
+  assert.equal(err.details.category, "space");
+});
+
+// --- DEBUG logging gating (cap-6dy.7) ------------------------------------
+
+test("DEBUG logging is gated behind logLevel", async () => {
+  const space = { id: "s1", title: "Space", icon: { type: "emoji", val: "x" } };
+
+  // Default logLevel ("info") — no DEBUG lines.
+  installFetch(() => makeResponse({ body: space }));
+  const original = console.error;
+  const captured: unknown[][] = [];
+  console.error = (...args: unknown[]) => { captured.push(args); };
+  try {
+    const client = newClient();
+    await client.getSpaces();
+  } finally {
+    console.error = original;
+  }
+  const anyDebug = captured.some(
+    (args) => typeof args[0] === "string" && args[0].startsWith("DEBUG:")
+  );
+  assert.equal(anyDebug, false, "no DEBUG lines at default log level");
+
+  // logLevel "debug" — DEBUG lines emitted.
+  installFetch(() => makeResponse({ body: space }));
+  const captured2: unknown[][] = [];
+  console.error = (...args: unknown[]) => { captured2.push(args); };
+  try {
+    const client = new CapacitiesClient({
+      apiToken: "test-token",
+      baseUrl: "https://api.capacities.io",
+      logLevel: "debug",
+    });
+    await client.getSpaces();
+  } finally {
+    console.error = original;
+  }
+  const anyDebug2 = captured2.some(
+    (args) => typeof args[0] === "string" && args[0].startsWith("DEBUG:")
+  );
+  assert.equal(anyDebug2, true, "DEBUG lines emitted at debug log level");
 });
