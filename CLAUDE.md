@@ -117,8 +117,12 @@ Objects have two content layers, handled differently — this is the central men
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
 ### Design docs
-- `docs/plans/2026-07-10-capacities-v2-migration-design.md` — v2 migration + verified write reference.
-- `docs/plans/2026-07-10-object-completion-principle-design.md` — "complete the object; compose across objects" principle + the media-object constraint + docs deliverables.
+Internal design/plan docs are **not** in this public repo — they live in the private
+`project-internals` repo at `project-internals/capacitiesMCP/plans/` (this repo gitignores
+`/docs/plans/`; only `docs/` user guides ship publicly):
+- `2026-07-10-capacities-v2-migration-design.md` — v2 migration + verified write reference.
+- `2026-07-10-object-completion-principle-design.md` — "complete the object; compose across objects" principle + the media-object constraint + docs deliverables.
+- `capacities_mcp_plan.md` — original technical plan & architecture.
 
 ### Building the DXT Extension
 ```bash
