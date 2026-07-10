@@ -660,4 +660,115 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
       }
     }
   );
+
+  // --- Thin object tools (cap-6dy.13) --------------------------------------
+  // Each wraps a single client call: append body, read-as-markdown, delete.
+
+  server.registerTool(
+    "append_to_object",
+    {
+      title: "Append to Capacities Object",
+      description:
+        "Append markdown content (body/blocks) to the END of an existing object " +
+        "WITHOUT changing its properties. Use update_object to change properties; " +
+        "use this to add notes/body.",
+      inputSchema: {
+        id: z.string().describe("Id of the object to append to"),
+        markdown: z.string().describe("Markdown content to append to the object's body")
+      }
+    },
+    async ({ id, markdown }) => {
+      try {
+        await client.appendBlocks({ id, markdown });
+        return {
+          content: [{ type: "text", text: `Appended body to object ${id}.` }]
+        };
+      } catch (error) {
+        const message =
+          error instanceof CapacitiesAPIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        return {
+          content: [{ type: "text", text: `Failed to append to object: ${message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    "get_object",
+    {
+      title: "Get Capacities Object (Markdown)",
+      description:
+        "Read an object rendered as Markdown (YAML frontmatter of its properties + body).",
+      inputSchema: {
+        id: z.string().describe("Id of the object to read")
+      }
+    },
+    async ({ id }) => {
+      try {
+        const obj = await client.getObjectMarkdown(id);
+        const header = obj.structureId ? `Structure: ${obj.structureId}\n\n` : "";
+        return {
+          content: [{ type: "text", text: header + (obj.markdown ?? "") }]
+        };
+      } catch (error) {
+        const message =
+          error instanceof CapacitiesAPIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        return {
+          content: [{ type: "text", text: `Failed to read object: ${message}` }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    "delete_object",
+    {
+      title: "Delete Capacities Object",
+      description:
+        "Delete an object. By default (hard_delete=false) it moves to trash and is " +
+        "recoverable in Capacities. Pass hard_delete=true to permanently delete — " +
+        "this cannot be undone.",
+      inputSchema: {
+        id: z.string().describe("Id of the object to delete"),
+        hard_delete: z
+          .boolean()
+          .default(false)
+          .describe(
+            "false (default) moves to trash (recoverable); true permanently deletes (cannot be undone)"
+          )
+      }
+    },
+    async ({ id, hard_delete }) => {
+      try {
+        await client.deleteObject(id, hard_delete);
+        const disposition = hard_delete
+          ? "permanently deleted (cannot be undone)"
+          : "moved to trash (recoverable in Capacities)";
+        return {
+          content: [{ type: "text", text: `Object ${id} ${disposition}.` }]
+        };
+      } catch (error) {
+        const message =
+          error instanceof CapacitiesAPIError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        return {
+          content: [{ type: "text", text: `Failed to delete object: ${message}` }],
+          isError: true
+        };
+      }
+    }
+  );
 }

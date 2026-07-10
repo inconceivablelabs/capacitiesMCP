@@ -193,6 +193,21 @@ export class CapacitiesClient {
     });
   }
 
+  // Reads an object rendered as Markdown (YAML frontmatter of properties + body).
+  // Distinct from getObject, which returns the STRUCTURED typed-wrapper form.
+  async getObjectMarkdown(id: string): Promise<{ id: string; structureId: string; markdown: string }> {
+    return this.makeRequest(`/object/markdown?id=${encodeURIComponent(id)}`); // GET
+  }
+
+  // Deletes an object. hardDelete is a REQUIRED query param: false moves the
+  // object to trash (recoverable in Capacities); true permanently deletes it.
+  async deleteObject(id: string, hardDelete: boolean): Promise<unknown> {
+    return this.makeRequest(
+      `/object?id=${encodeURIComponent(id)}&hardDelete=${hardDelete}`,
+      { method: "DELETE" }
+    );
+  }
+
   async saveToDailyNote(options: SaveToDailyNoteOptions) {
     // v2 daily-note append returns HTTP 200 with an empty body (handled by makeRequest).
     return this.makeRequest("/blocks/daily-note/append", {

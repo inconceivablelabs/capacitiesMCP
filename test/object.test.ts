@@ -103,6 +103,13 @@ function getUpdateObject() {
   return { handler: tools["update_object"].handler, client };
 }
 
+function getTool(name: string) {
+  const { server, tools } = makeServerStub();
+  const client = newClient();
+  setupObjectTools(server, client);
+  return { handler: tools[name].handler, client };
+}
+
 // --- Shared structure fixture ---------------------------------------------
 
 function structuresPayload() {
@@ -178,11 +185,32 @@ function router(opts: {
   updateId?: string;
   updateFail?: { status: number; text: string };
   onUpdate?: (body: any) => void;
+  // thin-tool plumbing (cap-6dy.13):
+  markdown?: { id: string; structureId: string; markdown: string }; // GET /object/markdown?id=
+  markdownFail?: { status: number; text: string };
+  deleteFail?: { status: number; text: string };
 }) {
   return (call: CapturedCall): RouteResponse => {
     const method = call.opts?.method ?? "GET";
     if (call.url.endsWith("/space/structures")) {
       return { body: structuresPayload() };
+    }
+    // GET /object/markdown?id=… → object rendered as Markdown (get_object).
+    if (call.url.includes("/object/markdown?id=") && method === "GET") {
+      if (opts.markdownFail) {
+        return { ok: false, status: opts.markdownFail.status, text: opts.markdownFail.text };
+      }
+      return {
+        body:
+          opts.markdown ?? { id: "obj-1", structureId: "RootTask", markdown: "" }
+      };
+    }
+    // DELETE /object?id=…&hardDelete=… → soft/hard delete (delete_object).
+    if (call.url.includes("/object?id=") && method === "DELETE") {
+      if (opts.deleteFail) {
+        return { ok: false, status: opts.deleteFail.status, text: opts.deleteFail.text };
+      }
+      return { status: 200, contentType: null, contentLength: "0" };
     }
     if (call.url.endsWith("/objects/search") && method === "POST") {
       const body = JSON.parse(call.opts.body);
@@ -855,4 +883,93 @@ test("update_object: no fields provided -> friendly no-op, no GET/PATCH", async 
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /Nothing to update/);
   assert.equal(calls.length, 0, "no network calls for a no-op");
+});
+
+// === Thin object tools (cap-6dy.13) =========================================
+
+// --- T1. append_to_object --------------------------------------------------
+
+test("append_to_object: POSTs /blocks/append with exactly {id, markdown}", async () => {
+  const { handler } = getTool("append_to_object");
+  const calls = installFetch(router({}));
+
+  const res = await handler({ id: "obj-1", markdown: "some notes" });
+
+  assert.equal(res.isError, undefined);
+  const appendCall = calls.find(c => c.url.endsWith("/blocks/append"));
+  assert.ok(appendCall, "POST /blocks/append must happen");
+  assert.equal(appendCall!.opts.method, "POST");
+  const body = JSON.parse(appendCall!.opts.body);
+  assert.deepEqual(body, { id: "obj-1", markdown: "some notes" });
+  assert.match(res.content[0].text, /obj-1/);
+});
+
+// --- T2. get_object --------------------------------------------------------
+
+test("get_object: GETs /object/markdown?id= (url-encoded) and returns the markdown", async () => {
+  const { handler } = getTool("get_object");
+  const calls = installFetch(
+    router({
+      markdown: {
+        id: "obj a/b",
+        structureId: "RootTask",
+        markdown: "---\ntitle: My Task\n---\n\nBody here"
+      }
+    })
+  );
+
+  const res = await handler({ id: "obj a/b" });
+
+  assert.equal(res.isError, undefined);
+  const getCall = calls.find(
+    c => c.url.includes("/object/markdown?id=") && (c.opts?.method ?? "GET") === "GET"
+  );
+  assert.ok(getCall, "GET /object/markdown must happen");
+  // id must be url-encoded in the query string.
+  assert.match(getCall!.url, /\/object\/markdown\?id=obj%20a%2Fb$/);
+  assert.match(res.content[0].text, /Body here/);
+});
+
+// --- T3. delete_object default (soft) --------------------------------------
+
+test("delete_object: default hard_delete=false → DELETE with hardDelete=false, trash confirmation", async () => {
+  const { handler } = getTool("delete_object");
+  const calls = installFetch(router({}));
+
+  const res = await handler({ id: "obj-1", hard_delete: false });
+
+  assert.equal(res.isError, undefined);
+  const delCall = calls.find(c => c.opts?.method === "DELETE");
+  assert.ok(delCall, "DELETE /object must happen");
+  assert.match(delCall!.url, /\/object\?id=obj-1&hardDelete=false$/);
+  assert.match(res.content[0].text, /trash|recoverable/i);
+});
+
+// --- T4. delete_object hard --------------------------------------------------
+
+test("delete_object: hard_delete=true → DELETE with hardDelete=true, permanent confirmation", async () => {
+  const { handler } = getTool("delete_object");
+  const calls = installFetch(router({}));
+
+  const res = await handler({ id: "obj-1", hard_delete: true });
+
+  assert.equal(res.isError, undefined);
+  const delCall = calls.find(c => c.opts?.method === "DELETE");
+  assert.ok(delCall, "DELETE /object must happen");
+  assert.match(delCall!.url, /\/object\?id=obj-1&hardDelete=true$/);
+  assert.match(res.content[0].text, /permanent/i);
+});
+
+// --- T5. error path: get_object 404 surfaced -------------------------------
+
+test("get_object: non-ok response → isError with surfaced body", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({ markdownFail: { status: 404, text: "cap_not_found: no such object" } })
+  );
+
+  const res = await handler({ id: "missing" });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /cap_not_found: no such object/);
 });
