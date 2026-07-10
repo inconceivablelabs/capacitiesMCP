@@ -64,7 +64,6 @@ export interface SaveWeblinkOptions {
   url: string;
   title?: string;
   description?: string;
-  tags?: string[];
   notes?: string;
 }
 

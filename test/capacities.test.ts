@@ -193,7 +193,7 @@ test("searchContent includes structureIds and limit in the POST body when provid
 
 // --- saveWeblink ---------------------------------------------------------
 
-test("saveWeblink POSTs /object/url with body {url, markdown} and returns the created object", async () => {
+test("saveWeblink POSTs /object/url with url, markdown, and constrained title/description properties", async () => {
   const created = {
     id: "obj-1",
     structureId: "st-weblink",
@@ -208,9 +208,8 @@ test("saveWeblink POSTs /object/url with body {url, markdown} and returns the cr
     spaceId: "ignored",
     url: "https://example.com",
     notes: "some note",
-    title: "ignored title",
-    description: "ignored desc",
-    tags: ["ignored"],
+    title: "My Title",
+    description: "My Description",
   });
 
   assert.equal(calls.length, 1);
@@ -220,13 +219,37 @@ test("saveWeblink POSTs /object/url with body {url, markdown} and returns the cr
   const body = JSON.parse(calls[0].opts.body);
   assert.equal(body.url, "https://example.com");
   assert.equal(body.markdown, "some note");
-  // Deferred fields must NOT be sent in this task
-  assert.equal("spaceId" in body, false);
+  assert.deepEqual(body.properties, {
+    title: { type: "title", title: { value: "My Title" } },
+    description: { type: "text", text: { value: "My Description" } },
+  });
+  // tags/titleOverwrite/spaceId are not part of the /object/url contract
   assert.equal("tags" in body, false);
   assert.equal("titleOverwrite" in body, false);
+  assert.equal("spaceId" in body, false);
 
   assert.equal(result.id, "obj-1");
   assert.equal(result.structureId, "st-weblink");
+});
+
+test("saveWeblink with only url sends exactly {url} — no properties, no markdown", async () => {
+  const created = {
+    id: "obj-2",
+    structureId: "st-weblink",
+    collections: [],
+    properties: {},
+    blocks: {},
+  };
+  const calls = installFetch(() => makeResponse({ body: created }));
+  const client = newClient();
+
+  await client.saveWeblink({ url: "https://example.org" });
+
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0].opts.body);
+  assert.deepEqual(body, { url: "https://example.org" });
+  assert.equal("properties" in body, false);
+  assert.equal("markdown" in body, false);
 });
 
 // --- saveToDailyNote -----------------------------------------------------

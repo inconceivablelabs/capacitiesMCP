@@ -141,14 +141,24 @@ export class CapacitiesClient {
   // Returns the created CapacitiesObject. Typed as unknown so existing tool
   // call-sites can assert their own response shape (see src/tools/weblink.ts).
   async saveWeblink(options: SaveWeblinkOptions): Promise<unknown> {
-    // TODO(cap-6dy.3): title/description/tags overrides are deferred; v2 /object/url
-    // takes only {url, markdown} for now.
+    // v2 /object/url properties is the constrained CreateObjectFromUrlProperties
+    // shape: only title/description are settable (tags are NOT — tag afterward
+    // via update_object). Wrapper shapes are live-verified elsewhere.
+    const properties: Record<string, unknown> = {};
+    if (options.title !== undefined) {
+      properties.title = { type: "title", title: { value: options.title } };
+    }
+    if (options.description !== undefined) {
+      properties.description = { type: "text", text: { value: options.description } };
+    }
+    const body: { url: string; markdown?: string; properties?: Record<string, unknown> } = {
+      url: options.url
+    };
+    if (options.notes !== undefined) body.markdown = options.notes;
+    if (Object.keys(properties).length > 0) body.properties = properties;
     return this.makeRequest<CapacitiesObject>("/object/url", {
       method: "POST",
-      body: JSON.stringify({
-        url: options.url,
-        markdown: options.notes
-      })
+      body: JSON.stringify(body)
     });
   }
 
