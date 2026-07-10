@@ -175,8 +175,8 @@ custom structures — from `get_space_info`). Each value is a typed wrapper:
 | `boolean` | `{type:"boolean", boolean:{value: boolean}}` | spec |
 | `url` | `{type:"url", url:{value: string\|null}}` | only writable url prop in-space is `Weblink.Iframe URL` |
 | `date` | `{type:"date", date:{start: ISO, end?: ISO\|null, dateResolution: "day"\|"time"}}` | **use `"time"` + full ISO timestamp — reliable. `"day"` requires UTC-midnight *aligned to the space TZ*; the 400 body states the exact expected value** |
-| `label` | `{type:"label", label:[{id, name, color?}]}` | array of **existing option objects**; empty `[]` clears. **option ids are NOT surfaced by `/space/structures`** (gap — read them off an existing instance via `GET /object`) |
-| `entity` | `{type:"entity", entity:[{id}, …]}` | array of targets by id; empty `[]` clears (multi-value relations) |
+| `label` | `{type:"label", label:[{id, name, color?}]}` | array of **existing option objects**; empty `[]` clears. **Option ids ARE surfaced**: each label property definition carries a `labelSet: [{id, name, color}]` (verified live — e.g. `RootTask.Status`) plus a `multiple` flag (single vs multi-select). So `get_space_info` can expose them and `create_object` can map a label *name* → option id. No gap. |
+| `entity` | `{type:"entity", entity:[{id}, …]}` | array of targets by id; empty `[]` clears (multi-value relations). The prop definition carries `allowedStructures: [structureId…]` — use it to scope the resolver's name search. |
 | `richText` | `{type:"richText", richText:{value:[…tokens]}}` | token array, not a string |
 
 **Reads:** `GET /object?id=` returns the **structured** object (typed-wrapper properties + blocks) — the design's
