@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
-import { validateUUID, validateUrl } from "../utils/validation.js";
+import { validateUrl } from "../utils/validation.js";
 
 export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
   server.registerTool(
@@ -10,7 +10,6 @@ export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
       title: "Save Weblink to Capacities",
       description: "Save a URL as a weblink object in your Capacities space with optional title, description, tags, and notes",
       inputSchema: {
-        space_id: z.string().describe("The space to save the weblink in"),
         url: z.string().describe("The URL to save"),
         title: z.string().optional().describe("Custom title for the weblink (max 500 chars)"),
         description: z.string().optional().describe("Custom description (max 1000 chars)"),
@@ -18,18 +17,13 @@ export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
         notes: z.string().optional().describe("Additional notes in markdown format. Use actual newlines for line breaks, NOT escaped \\n characters.")
       }
     },
-    async ({ space_id, url, title, description, tags, notes }) => {
-      if (!validateUUID(space_id)) {
-        throw new Error("Invalid space ID format");
-      }
-
+    async ({ url, title, description, tags, notes }) => {
       if (!validateUrl(url)) {
         throw new Error("Invalid URL format");
       }
 
       try {
         const result = await client.saveWeblink({
-          spaceId: space_id,
           url,
           title,
           description,

@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
-import { validateUUID } from "../utils/validation.js";
 
 export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
   // Search content tool
@@ -9,32 +8,21 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
     "search_content",
     {
       title: "Search Capacities Content",
-      description: "Search for content across your Capacities spaces by title matching",
+      description: "Search Capacities objects by title match in your space. Optionally scope by structureIds (from get_space_info) and cap results with limit.",
       inputSchema: {
         query: z.string().describe("Search query or keywords"),
-        space_id: z.string().optional().describe("Specific space to search in (optional)")
+        structureIds: z.array(z.string()).optional().describe("Optional structure IDs to scope the search to (from get_space_info)"),
+        limit: z.number().int().positive().optional().describe("Max number of results")
       }
     },
-    async ({ query, space_id }) => {
-      console.error("DEBUG: search_content called with:", { query, space_id });
-      
+    async ({ query, structureIds, limit }) => {
       // Validation
       if (!query || typeof query !== "string") {
         throw new Error("Query is required and must be a string");
       }
 
-      if (space_id && !validateUUID(space_id)) {
-        throw new Error("Invalid space ID format");
-      }
-
       try {
-        const spaces = await client.getSpaces();
-        const searchSpaces = space_id ? [space_id] : spaces.map(s => s.id);
-
-        const results = await client.searchContent({
-          query,
-          spaceIds: searchSpaces
-        });
+        const results = await client.searchContent({ query, structureIds, limit });
 
         if (results.length === 0) {
           return {
@@ -76,12 +64,10 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
       inputSchema: {}
     },
     async () => {
-      console.error("DEBUG: list_spaces called");
-      
       try {
         const spaces = await client.getSpaces();
-        
-        const spaceList = spaces.map(space => 
+
+        const spaceList = spaces.map(space =>
           `**${space.title}**\nID: ${space.id}\nIcon: ${space.icon.val}`
         ).join("\n\n");
 
@@ -94,7 +80,7 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
       } catch (error) {
         return {
           content: [{
-            type: "text", 
+            type: "text",
             text: `Failed to retrieve spaces: ${error instanceof Error ? error.message : String(error)}`
           }],
           isError: true
@@ -107,27 +93,19 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
   server.registerTool(
     "get_space_info",
     {
-      title: "Get Space Information",
-      description: "Get detailed information about a specific Capacities space",
-      inputSchema: {
-        space_id: z.string().describe("The ID of the space")
-      }
+      title: "Get Space Structures",
+      description: "Get the structures (object types), their writable properties, and collections for your Capacities space.",
+      inputSchema: {}
     },
-    async ({ space_id }) => {
-      console.error("DEBUG: get_space_info called with space_id:", space_id);
-      
-      if (!space_id || !validateUUID(space_id)) {
-        throw new Error(`Invalid space ID: ${space_id}`);
-      }
-
+    async () => {
       try {
-        const spaceInfo = await client.getSpaceInfo(space_id);
-        
+        const spaceInfo = await client.getSpaceInfo();
+
         const structureList = spaceInfo.structures.map(structure => {
           const properties = structure.propertyDefinitions
             .map(prop => `- ${prop.name} (${prop.type})${prop.writable ? "" : " [read-only]"}`)
             .join("\n");
-          
+
           const collections = structure.collections
             .map(col => `- ${col.title}`)
             .join("\n");

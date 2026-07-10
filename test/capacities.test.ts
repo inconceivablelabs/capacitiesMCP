@@ -170,6 +170,27 @@ test("searchContent makes exactly ONE POST /objects/search with query and NO spa
   assert.equal((results[0] as any).spaceId, undefined);
 });
 
+test("searchContent includes structureIds and limit in the POST body when provided, omits them otherwise", async () => {
+  const calls = installFetch(() => makeResponse({ body: { results: [] } }));
+  const client = newClient();
+
+  await client.searchContent({ query: "q", structureIds: ["st-1", "st-2"], limit: 5 });
+
+  const body = JSON.parse(calls[0].opts.body);
+  assert.equal(body.query, "q");
+  assert.deepEqual(body.structureIds, ["st-1", "st-2"]);
+  assert.equal(body.limit, 5);
+
+  const calls2 = installFetch(() => makeResponse({ body: { results: [] } }));
+  const client2 = newClient();
+
+  await client2.searchContent({ query: "q2" });
+
+  const body2 = JSON.parse(calls2[0].opts.body);
+  assert.equal("structureIds" in body2, false);
+  assert.equal("limit" in body2, false);
+});
+
 // --- saveWeblink ---------------------------------------------------------
 
 test("saveWeblink POSTs /object/url with body {url, markdown} and returns the created object", async () => {

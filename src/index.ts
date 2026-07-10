@@ -6,8 +6,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CapacitiesClient } from "./client/capacities.js";
 import { setupSearchTools } from "./tools/search.js";
 import { setupCreationTools } from "./tools/create.js";
-import { setupAnalysisTools } from "./tools/content-analysis.js";
-import { setupSmartSearchTools } from "./tools/smart-search.js";
 import { setupDailyNoteTools } from "./tools/daily-note.js";
 import { setupWebLinkTools } from "./tools/weblink.js";
 import { setupSpaceResources } from "./resources/spaces.js";
@@ -32,8 +30,6 @@ async function main() {
   // Setup tools
   setupSearchTools(server, capacitiesClient);
   setupCreationTools(server, capacitiesClient);
-  setupAnalysisTools(server, capacitiesClient);
-  setupSmartSearchTools(server, capacitiesClient);
   setupDailyNoteTools(server, capacitiesClient);
   setupWebLinkTools(server, capacitiesClient);
 
