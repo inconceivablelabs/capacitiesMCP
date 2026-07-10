@@ -153,10 +153,44 @@ repetitive.
 | # | Assumption | Risk | Validation |
 |---|---|---|---|
 | A1 (RESOLVED) | Multi-value relations: markdown caps at 1; **structured `/object` links N** | — | Verified live 2026-07-10 |
-| A2 | Structured typed-wrapper write shape for `date`/`label`/`url`/`richText`/`number` (verified: title, text, entity; date via md) | 400 on write | Throwaway create per type on a structure that has it |
-| A3 | `create_object` body mechanism: blocks in `POST /object` vs a follow-up `POST /blocks/append` | body dropped / two-call needed | Probe `POST /object` with blocks; else append after create |
-| A4 | Writing a read-only prop → 400 (not silent) | opaque partial writes | Throwaway create setting a `number`/`lastUpdatedAt` |
+| A2 (VERIFIED) | Structured typed-wrapper write shapes for all types | — | Spec + live-verified 2026-07-10 (cap-6dy.10) — see "Verified write reference" below |
+| A3 (VERIFIED) | Body mechanism: `POST /object` has a top-level `blocks` field, AND `POST /blocks/append {id, markdown}` appends markdown-converted blocks | — | Live-verified 2026-07-10 (cap-6dy.10) — use `/blocks/append` w/ markdown |
+| A4 (VERIFIED) | Writing a read-only prop → **400** `cap_invalid_input` "Cannot update a read-only property." (NOT silent) | — | Live-verified 2026-07-10 (cap-6dy.10) |
 | A5 (VERIFIED) | PATCH replaces named prop / merges others; single-space; `writable` flag exists; `GET /object/markdown` returns JSON; `DELETE /object` works | — | Verified live 2026-07-10 |
+
+## Verified write reference (cap-6dy.10 — spec `developers.capacities.io/openapi.json` + live 2026-07-10)
+
+**Create envelope:** `POST /object { structureId, properties?, blocks?, collections? }` → 200, returns the
+full structured object. `structureId` accepts a UUID or a built-in id (`RootTask`, `RootPage`, `MediaWebResource`, …).
+`collections:[]` = default collection. Returns generated `blocks` scaffold (e.g. `RootTask_notes`).
+
+**`properties` is a map keyed by property-definition id** (`title`, `date`, `status`, or the UUID prop-ids of
+custom structures — from `get_space_info`). Each value is a typed wrapper:
+
+| type | write shape | notes |
+|---|---|---|
+| `title` | `{type:"title", title:{value: string\|null}}` | |
+| `text` | `{type:"text", text:{value: string\|null}}` | |
+| `number` | `{type:"number", number:{value: number\|null}}` | no writable number prop in Tom's space (all read-only) — shape from spec |
+| `boolean` | `{type:"boolean", boolean:{value: boolean}}` | spec |
+| `url` | `{type:"url", url:{value: string\|null}}` | only writable url prop in-space is `Weblink.Iframe URL` |
+| `date` | `{type:"date", date:{start: ISO, end?: ISO\|null, dateResolution: "day"\|"time"}}` | **use `"time"` + full ISO timestamp — reliable. `"day"` requires UTC-midnight *aligned to the space TZ*; the 400 body states the exact expected value** |
+| `label` | `{type:"label", label:[{id, name, color?}]}` | array of **existing option objects**; empty `[]` clears. **option ids are NOT surfaced by `/space/structures`** (gap — read them off an existing instance via `GET /object`) |
+| `entity` | `{type:"entity", entity:[{id}, …]}` | array of targets by id; empty `[]` clears (multi-value relations) |
+| `richText` | `{type:"richText", richText:{value:[…tokens]}}` | token array, not a string |
+
+**Reads:** `GET /object?id=` returns the **structured** object (typed-wrapper properties + blocks) — the design's
+"markdown-only read" note was wrong; `update_object` should GET structured to see current multi-value lists before a
+replace. `GET /object/markdown?id=` returns `{id, structureId, markdown}` (frontmatter + body).
+
+**Body/append:** `POST /blocks/append { id, markdown }` → 200, converts markdown to blocks and appends (verified).
+This is the `append_to_object` (cap-6dy.13) mechanism; `create_object` sets properties then optionally appends body
+via a second `/blocks/append` call (simpler than inline block trees).
+
+**Read-only writes** → 400 `cap_invalid_input`; respect the `writable` flag from `get_space_info`.
+
+**Delete:** `DELETE /object?id=&hardDelete=true` → 200 (`hardDelete` is a **required** query param; omit/false = soft
+trash, which is also reachable via PATCH `deleteRequested:true`).
 
 ## Testing strategy
 
