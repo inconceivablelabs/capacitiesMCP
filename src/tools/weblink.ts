@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
+import { CapacitiesObject } from "../client/types.js";
 import { validateUrl } from "../utils/validation.js";
 import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
 
@@ -28,12 +29,16 @@ export function setupWebLinkTools(server: McpServer, client: CapacitiesClient) {
           title,
           description,
           notes
-        }) as { id: string; title: string; description: string };
+        }) as CapacitiesObject;
 
+        // The API response nests title/description under `properties` (or
+        // omits them); report the user-supplied override args instead of
+        // reading them off the response, which are the only values we know
+        // were actually set vs. auto-fetched (code review fix #5).
         return {
           content: [{
             type: "text",
-            text: `Saved weblink!\n\n**Title:** ${result.title || "(auto-generated)"}\n**URL:** ${url}\n**ID:** ${result.id}\n**Description:** ${result.description || "(auto-generated)"}`
+            text: `Saved weblink!\n\n**Title:** ${title || "(auto-generated)"}\n**URL:** ${url}\n**ID:** ${result.id}\n**Description:** ${description || "(auto-generated)"}`
           }]
         };
       } catch (error) {

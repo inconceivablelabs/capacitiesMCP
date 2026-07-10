@@ -130,12 +130,45 @@ export async function buildWrappers(
         setSummary.push(`${def.name}=${n}`);
         break;
       }
-      case "boolean":
-        wrappers[propId] = { type: "boolean", boolean: { value: Boolean(value) } };
-        setSummary.push(`${def.name}=${Boolean(value)}`);
+      case "boolean": {
+        let b: boolean;
+        if (typeof value === "boolean") {
+          b = value;
+        } else if (typeof value === "string") {
+          const s = value.trim().toLowerCase();
+          if (s === "true") {
+            b = true;
+          } else if (s === "false") {
+            b = false;
+          } else {
+            problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+            break;
+          }
+        } else if (typeof value === "number") {
+          if (value === 1) {
+            b = true;
+          } else if (value === 0) {
+            b = false;
+          } else {
+            problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+            break;
+          }
+        } else {
+          problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+          break;
+        }
+        wrappers[propId] = { type: "boolean", boolean: { value: b } };
+        setSummary.push(`${def.name}=${b}`);
         break;
+      }
       case "date": {
-        const parsed = new Date(value as string);
+        if (typeof value !== "string") {
+          problems.push(
+            `\`${propId}\` date must be an ISO-8601 string, got ${typeof value}: ${String(value)}`
+          );
+          break;
+        }
+        const parsed = new Date(value);
         if (Number.isNaN(parsed.getTime())) {
           problems.push(`\`${propId}\` value is not a valid date: ${String(value)}`);
           break;
@@ -386,14 +419,36 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         // 4. All validation passed — now (and only now) materialize missing
         //    relation targets and finalize their entity wrappers.
         const createdEntities: string[] = [];
-        await finalizeRelationPlans(
-          client,
-          structures,
-          wrappers,
-          relationPlans,
-          setSummary,
-          createdEntities
-        );
+        try {
+          await finalizeRelationPlans(
+            client,
+            structures,
+            wrappers,
+            relationPlans,
+            setSummary,
+            createdEntities
+          );
+        } catch (error) {
+          const msg =
+            error instanceof CapacitiesAPIError
+              ? error.message
+              : error instanceof Error
+                ? error.message
+                : String(error);
+          const reuseNote =
+            createdEntities.length > 0
+              ? ` These were already created and will be reused (not duplicated) if you retry: ${createdEntities.join(", ")}.`
+              : "";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed while creating relation targets: ${msg}.${reuseNote} The object itself was not created.`
+              }
+            ],
+            isError: true
+          };
+        }
 
         // 5. Create the object.
         const created = await client.createObject({
@@ -595,14 +650,36 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
 
         // 6. All validation passed — materialize missing relation targets.
         const createdEntities: string[] = [];
-        await finalizeRelationPlans(
-          client,
-          structures,
-          wrappers,
-          relationPlans,
-          setSummary,
-          createdEntities
-        );
+        try {
+          await finalizeRelationPlans(
+            client,
+            structures,
+            wrappers,
+            relationPlans,
+            setSummary,
+            createdEntities
+          );
+        } catch (error) {
+          const msg =
+            error instanceof CapacitiesAPIError
+              ? error.message
+              : error instanceof Error
+                ? error.message
+                : String(error);
+          const reuseNote =
+            createdEntities.length > 0
+              ? ` These were already created and will be reused (not duplicated) if you retry: ${createdEntities.join(", ")}.`
+              : "";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed while creating relation targets: ${msg}.${reuseNote} The object itself was not updated.`
+              }
+            ],
+            isError: true
+          };
+        }
 
         // 7. PATCH the object (merges by key; replaces each named prop's value).
         const updated = await client.updateObject({

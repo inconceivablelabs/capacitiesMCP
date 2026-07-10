@@ -125,6 +125,7 @@ function structuresPayload() {
           { id: "title", name: "Title", type: "title", writable: true },
           { id: "note", name: "Note", type: "text", writable: true },
           { id: "due", name: "Due Date", type: "date", writable: true },
+          { id: "active", name: "Active", type: "boolean", writable: true },
           {
             id: "status",
             name: "Status",
@@ -605,6 +606,198 @@ test("no orphan: a later validation problem aborts BEFORE any entity is auto-cre
   );
   assert.equal(posts.length, 0, "must not create the entity target before the problem gate");
   assert.equal(createBodies.length, 0);
+});
+
+// --- 13. Boolean scalar coercion (code review fix #1) ----------------------
+
+test("boolean scalar: string \"false\" writes false, not true", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { active: "false" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.active, { type: "boolean", boolean: { value: false } });
+});
+
+test("boolean scalar: string \"true\" writes true", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { active: "true" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.active, { type: "boolean", boolean: { value: true } });
+});
+
+test("boolean scalar: actual boolean true writes true", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { active: true },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.active, { type: "boolean", boolean: { value: true } });
+});
+
+test("boolean scalar: unparseable string -> isError, no create", async () => {
+  const { handler } = getCreateObject();
+  const calls = installFetch(router({}));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { active: "maybe" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /`active` value is not a boolean/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "POST"),
+    false,
+    "no create must happen"
+  );
+});
+
+// --- 14. Numeric date rejected, only ISO strings parsed (code review fix #2) -
+
+test("date scalar: numeric value is rejected, nothing written", async () => {
+  const { handler } = getCreateObject();
+  const calls = installFetch(router({}));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { due: 20260710 },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /`due` date must be an ISO-8601 string/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "POST"),
+    false,
+    "no create must happen"
+  );
+});
+
+test("date scalar: valid ISO string writes the correct date", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { due: "2026-07-10T00:00:00Z" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.due, {
+    type: "date",
+    date: { start: "2026-07-10T00:00:00.000Z", dateResolution: "time" }
+  });
+});
+
+test("date scalar: unparseable string -> isError, no create", async () => {
+  const { handler } = getCreateObject();
+  const calls = installFetch(router({}));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { due: "not-a-date" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /`due` value is not a valid date/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "POST"),
+    false
+  );
+});
+
+// --- 15. Orphaned relation targets are reported transparently (fix #3) -----
+
+test("relation target creation failure mid-batch -> isError names created entities, notes reuse, main object not created", async () => {
+  const { handler } = getCreateObject();
+  const calls: CapturedCall[] = [];
+  let entityCreateCount = 0;
+  (globalThis as any).fetch = async (url: string, opts: any) => {
+    const call = { url, opts };
+    calls.push(call);
+    const method = opts?.method ?? "GET";
+    if (url.endsWith("/space/structures")) {
+      return makeResponse({ body: structuresPayload() });
+    }
+    if (url.endsWith("/objects/search") && method === "POST") {
+      // Neither name resolves -> both are unmatched -> both queued for auto-create.
+      return makeResponse({ body: { results: [] } });
+    }
+    if (url.endsWith("/object") && method === "POST") {
+      const body = JSON.parse(opts.body);
+      entityCreateCount += 1;
+      if (entityCreateCount === 1) {
+        // First entity target creates fine.
+        return makeResponse({
+          body: {
+            id: "person-1",
+            structureId: body.structureId,
+            collections: [],
+            properties: {},
+            blocks: {}
+          }
+        });
+      }
+      // Second entity target hits a transient failure.
+      return makeResponse({ ok: false, status: 500, text: "cap_internal: transient failure" });
+    }
+    throw new Error(`unexpected call: ${method} ${url}`);
+  };
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    relations: { assignee: ["Newbie1", "Newbie2"] },
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /Failed while creating relation targets/);
+  assert.match(res.content[0].text, /Newbie1/);
+  assert.match(res.content[0].text, /reused/i);
+  assert.match(res.content[0].text, /not created/i);
+  // The parent object itself must never be created — only the two entity
+  // creation attempts (one success, one failure) hit POST /object.
+  const posts = calls.filter(
+    c => c.url.endsWith("/object") && c.opts.method === "POST"
+  );
+  assert.equal(posts.length, 2, "only the two entity-create attempts, no main create");
 });
 
 // === update_object ==========================================================
