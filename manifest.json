@@ -2,8 +2,8 @@
   "dxt_version": "0.1",
   "name": "capacities-mcp-server",
   "display_name": "Capacities MCP Server",
-  "version": "1.0.0",
-  "description": "Advanced Capacities knowledge management integration with search, content creation, and analysis tools",
+  "version": "2.0.0",
+  "description": "Capacities v2 knowledge management integration: search, object CRUD, weblink capture, and daily notes. Runs on the Capacities v2 REST API.",
   "author": {
     "name": "Tom Booth",
     "email": "tom@inconceivablelabs.com"
@@ -27,7 +27,7 @@
     "capacities_api_token": {
       "type": "string",
       "title": "Capacities API Token",
-      "description": "Your Capacities API token (get from Capacities Desktop App → Settings → API)",
+      "description": "Your Capacities v2 API token (cap-api-…) from the Capacities Desktop App → Settings → API. Scoped to a single space.",
       "required": true
     },
     "capacities_api_base_url": {
@@ -48,43 +48,47 @@
   "tools": [
     {
       "name": "search_content",
-      "description": "Search for content across your Capacities spaces using keywords"
+      "description": "Search objects by title across your Capacities space (optional structure filter and limit)"
     },
     {
-      "name": "list_spaces", 
-      "description": "Get a list of all your Capacities spaces"
+      "name": "list_spaces",
+      "description": "List the single space your API token is scoped to"
     },
     {
       "name": "get_space_info",
-      "description": "Get detailed information about a specific Capacities space"
+      "description": "Get the space's structures with property ids, types, writability, label options, and relation targets"
     },
     {
-      "name": "create_structured_note",
-      "description": "Create structured note templates (meeting, daily-reflection, task-list, research)"
+      "name": "create_object",
+      "description": "Create a typed object of any structure; properties/labels/relations set by name (strict), optional markdown body"
     },
     {
-      "name": "smart_search",
-      "description": "Intelligent search with context awareness and related content"
+      "name": "update_object",
+      "description": "Update a structured object's properties/labels/relations (replaces the value of each named property)"
     },
     {
-      "name": "advanced_search", 
-      "description": "Search with date ranges, object types, and other filters"
+      "name": "get_object",
+      "description": "Read an object's content as markdown"
     },
     {
-      "name": "analyze_content_patterns",
-      "description": "Analyze patterns in your Capacities content"
+      "name": "append_to_object",
+      "description": "Append markdown to an object's body (supports () tasks, #tags, [[links]])"
     },
     {
-      "name": "identify_knowledge_gaps",
-      "description": "Find topics that might be missing or underdeveloped"
+      "name": "delete_object",
+      "description": "Move an object to trash (recoverable in Capacities)"
     },
     {
       "name": "save_weblink",
-      "description": "Save a URL as a weblink object with metadata and tags"
+      "description": "Save a URL as a Weblink object; auto-fetches title/description, with optional overrides and notes"
     },
     {
       "name": "add_to_daily_note",
-      "description": "Add content to today's daily note"
+      "description": "Append markdown to today's daily note"
+    },
+    {
+      "name": "create_structured_note",
+      "description": "Legacy: create a markdown-template note in the daily note (meeting, research, weekly-review)"
     }
   ],
   "compatibility": {

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
-import { validateUUID } from "../utils/validation.js";
+import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
 
 export function setupDailyNoteTools(server: McpServer, client: CapacitiesClient) {
   server.registerTool(
@@ -10,23 +10,17 @@ export function setupDailyNoteTools(server: McpServer, client: CapacitiesClient)
       title: "Add to Daily Note",
       description: "Add content to today's daily note in Capacities. Supports markdown. Each call appends to the existing daily note.",
       inputSchema: {
-        space_id: z.string().describe("The space containing the daily note"),
-        content: z.string().describe("Content to add (supports markdown)"),
+        content: z.string().describe("Content to add (supports markdown)." + MARKDOWN_BODY_NOTE),
         no_timestamp: z.boolean().default(false).describe("Skip adding timestamp to the entry")
       }
     },
-    async ({ space_id, content, no_timestamp }) => {
-      if (!validateUUID(space_id)) {
-        throw new Error("Invalid space ID format");
-      }
-
+    async ({ content, no_timestamp }) => {
       if (!content.trim()) {
         throw new Error("Content must not be empty");
       }
 
       try {
         await client.saveToDailyNote({
-          spaceId: space_id,
           content,
           noTimestamp: no_timestamp
         });

@@ -1,6 +1,6 @@
 {
   "name": "capacities-mcp-server",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP Server for Capacities knowledge management integration with advanced search, content creation, and analysis tools",
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "build": "tsc && chmod +x server/dist/index.js",
     "dev": "tsc --watch",
     "start": "node server/dist/index.js",
-    "inspector": "npx @modelcontextprotocol/inspector server/dist/index.js"
+    "inspector": "npx @modelcontextprotocol/inspector server/dist/index.js",
+    "test": "tsc -p tsconfig.test.json && node --test \"test-dist/test/**/*.test.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

@@ -1,0 +1,43 @@
+# mcpb pack ignore file (mcpb reads THIS, not .dxtignore).
+# The extension only needs manifest.json + server/dist (compiled JS) + server/node_modules
+# (production runtime deps). Everything below is dev/repo/agent state or bloat.
+
+# Root dev dependencies — runtime deps live in server/node_modules (node resolves upward).
+/node_modules/
+
+# TypeScript source + test build output + build config (runtime uses server/dist).
+/src/
+/test/
+/test-dist/
+/tsconfig.json
+/tsconfig.test.json
+
+# Repo / dev / agent state — MUST NOT ship (some of this is private data).
+/.git/
+/.gitignore
+/.github/
+/.claude/
+/.beads/
+/.private-journal/
+/.serena/
+/docs/
+/.env
+*.log
+
+# Old packaged artifacts.
+*.dxt
+*.mcpb
+
+# Source maps and type declarations — not needed at runtime.
+server/dist/**/*.map
+server/dist/**/*.d.ts
+server/dist/**/*.d.ts.map
+
+# Docs / metadata inside bundled deps.
+**/CHANGELOG.md
+**/HISTORY.md
+**/README.md
+**/readme.md
+**/SECURITY.md
+**/CONTRIBUTING.md
+**/*.ts

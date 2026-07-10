@@ -6,10 +6,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CapacitiesClient } from "./client/capacities.js";
 import { setupSearchTools } from "./tools/search.js";
 import { setupCreationTools } from "./tools/create.js";
-import { setupAnalysisTools } from "./tools/content-analysis.js";
-import { setupSmartSearchTools } from "./tools/smart-search.js";
 import { setupDailyNoteTools } from "./tools/daily-note.js";
 import { setupWebLinkTools } from "./tools/weblink.js";
+import { setupObjectTools } from "./tools/object.js";
 import { setupSpaceResources } from "./resources/spaces.js";
 import { validateEnvironment } from "./utils/validation.js";
 
@@ -20,22 +19,22 @@ async function main() {
   // Initialize Capacities API client
   const capacitiesClient = new CapacitiesClient({
     apiToken: env.apiToken,
-    baseUrl: env.baseUrl
+    baseUrl: env.baseUrl,
+    logLevel: env.logLevel
   });
 
   // Create MCP server
   const server = new McpServer({
     name: "capacities-mcp-server",
-    version: "1.0.0"
+    version: "2.0.0"
   });
 
   // Setup tools
   setupSearchTools(server, capacitiesClient);
   setupCreationTools(server, capacitiesClient);
-  setupAnalysisTools(server, capacitiesClient);
-  setupSmartSearchTools(server, capacitiesClient);
   setupDailyNoteTools(server, capacitiesClient);
   setupWebLinkTools(server, capacitiesClient);
+  setupObjectTools(server, capacitiesClient);
 
   // Setup resources
   setupSpaceResources(server, capacitiesClient);
