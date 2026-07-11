@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep SHA-pinned GitHub Actions current (pins would otherwise rot).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # npm deps — root (build/test tooling) and server (runtime).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/server"
+    schedule:
+      interval: "weekly"
