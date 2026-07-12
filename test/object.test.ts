@@ -1497,7 +1497,7 @@ test("composite create needing a 2nd object window completes with exactly one bo
   assert.equal(res.isError, undefined, "the write must succeed");
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
   assert.match(res.content[0].text, /Note: large write/);
-  assert.match(res.content[0].text, /created 31 targets/);
+  assert.match(res.content[0].text, /31 target writes/);
 });
 
 test("composite create needing more than the one-window budget throws RATE_LIMIT_EXCEEDED", async () => {
@@ -1558,7 +1558,7 @@ test("pre-flight warn: a create with >30 relation values returns success WITH th
 
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /Note: large write/);
-  assert.match(res.content[0].text, /resolved 31 relations/);
+  assert.match(res.content[0].text, /31 relation refs/);
 });
 
 test("pre-flight warn: a normal small create returns success with NO warning line", async () => {

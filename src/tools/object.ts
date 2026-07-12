@@ -48,8 +48,8 @@ function largeBatchWarning(
   const objectDemand = relationPlans.reduce((n, p) => n + p.toCreate.length, 0) + 1;
   if (searchDemand > RATE_WINDOW_MAX || objectDemand > RATE_WINDOW_MAX) {
     return (
-      `Note: large write — resolved ${searchDemand} relations / created ${objectDemand} targets ` +
-      `against a 30-per-60s limit; paced internally. Split into smaller batches for snappier writes.`
+      `Note: large write — ${searchDemand} relation refs / ${objectDemand} target writes ` +
+      `against a 30-per-60s limit; may pace internally (up to ~60s). Split into smaller batches for snappier writes.`
     );
   }
   return null;
@@ -319,7 +319,8 @@ export async function buildWrappers(
     }
 
     const names = toArray(rawNames);
-    // No createEntity passed → resolveEntities performs no writes.
+    // resolveEntities is write-free — it only classifies (linked/unmatched/
+    // ambiguous/truncated); auto-create is handled later by finalizeRelationPlans.
     const r = await resolveEntities(client, names, def.allowedStructures, { pace });
 
     if (r.ambiguous.length > 0) {
