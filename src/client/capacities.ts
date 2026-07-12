@@ -260,6 +260,11 @@ export class CapacitiesClient {
 
   async saveToDailyNote(options: SaveToDailyNoteOptions) {
     // v2 daily-note append returns HTTP 200 with an empty body (handled by makeRequest).
+    // cap-6dy.23: v1 sent origin:"mcp" here (set the note's origin icon). v2 dropped
+    // `origin` entirely — it is not accepted on /blocks/daily-note/append nor ANY v2
+    // write endpoint (verified against the live OpenAPI spec 2026-07-12). So the MCP
+    // origin marker is no longer settable via the API; nothing to re-add. (v2 also
+    // supports a `date` field here to target a specific day — not yet exposed.)
     return this.makeRequest("/blocks/daily-note/append", {
       method: "POST",
       body: JSON.stringify({

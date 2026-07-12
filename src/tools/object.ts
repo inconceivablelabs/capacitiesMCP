@@ -15,15 +15,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient, CapacitiesAPIError, WaitBudget, WINDOW_MS } from "../client/capacities.js";
 import { CapacitiesStructure, PropertyDefinition } from "../client/types.js";
-import { resolveEntities } from "./resolution.js";
+import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
 import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
+// Shared with resolution.ts — was a byte-identical local dupe (cap-6dy.24 #4).
+import { normalizeName as normalize } from "../utils/normalize.js";
 
 // Scalar property types handled by the `properties` map.
 const SCALAR_TYPES = new Set(["text", "url", "number", "boolean", "date"]);
-
-function normalize(name: string): string {
-  return name.trim().toLowerCase();
-}
 
 function toArray<T>(v: T | T[]): T[] {
   return Array.isArray(v) ? v : [v];
@@ -331,6 +329,17 @@ export async function buildWrappers(
           `ambiguous relation \`${a.name}\` for \`${propId}\`: multiple matches: ${cands}`
         );
       }
+      continue;
+    }
+
+    // cap-6dy.22: the title search hit the 50-result cap with no exact match, so a
+    // matching object may exist beyond it. Refuse rather than risk an auto-created
+    // duplicate — even if create_missing_relations is off, a "not found" here would
+    // be misleading. Ask for a more specific/unique name.
+    if (r.truncated.length > 0) {
+      problems.push(
+        `could not confirm ${r.truncated.join(", ")} for \`${propId}\`: the title search returned the maximum ${SEARCH_LIMIT} results with no exact match, so a matching object may exist beyond the cap. Use a more specific/unique name to avoid creating a duplicate.`
+      );
       continue;
     }
 
@@ -667,12 +676,14 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 1. Read the current STRUCTURED object (typed-wrapper properties) — this
-        //    yields structureId and the prior values needed for the replace-audit.
-        const current = await client.getObject(objectId);
-
-        // 2. Resolve the object's structure from space info.
-        const { structures } = await client.getSpaceInfo();
+        // 1. Read the current STRUCTURED object (typed-wrapper properties, for
+        //    structureId + prior replace-audit values) and the space structures.
+        //    getSpaceInfo takes no input from getObject, so run them concurrently
+        //    (distinct rate windows — object vs space) (cap-6dy.24 #2).
+        const [current, { structures }] = await Promise.all([
+          client.getObject(objectId),
+          client.getSpaceInfo()
+        ]);
         const structure = structures.find(s => s.id === current.structureId);
         if (!structure) {
           const available = structures.map(s => `${s.id} (${s.title})`).join(", ");
@@ -699,13 +710,24 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           budget
         );
 
-        // 4. Replace-audit: for every multi-value (label/entity) prop we are about
+        // 4. Fail-before-write if any problems accumulated — write NOTHING.
+        if (problems.length > 0) {
+          return {
+            content: [
+              { type: "text", text: "Cannot update object:\n- " + problems.join("\n- ") }
+            ],
+            isError: true
+          };
+        }
+
+        // 5. Replace-audit: for every multi-value (label/entity) prop we are about
         //    to write, capture the PRIOR value from the structured object so the
         //    success message can show `replaced <name>: <prior> → <new>`. This
         //    operationalizes the replace warning. Best-effort: structured entity
         //    values carry ids (not titles), so relations report a prior count.
         //    Keys accept a property NAME or id (D2) — resolve to the real id
         //    before indexing into `current.properties`, which the API keys by id.
+        //    Built AFTER the fail gate so the early-return path skips it (cap-6dy.24 #5).
         const propIndex = buildPropertyIndex(structure);
 
         const replaceAudit: string[] = [];
@@ -735,16 +757,6 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
               `replaced ${def.name}: ${priorCount} linked → ${nextCount} linked`
             );
           }
-        }
-
-        // 5. Fail-before-write if any problems accumulated — write NOTHING.
-        if (problems.length > 0) {
-          return {
-            content: [
-              { type: "text", text: "Cannot update object:\n- " + problems.join("\n- ") }
-            ],
-            isError: true
-          };
         }
 
         // 6. All validation passed — materialize missing relation targets.

@@ -1577,3 +1577,35 @@ test("pre-flight warn: a normal small create returns success with NO warning lin
   assert.equal(res.isError, undefined);
   assert.doesNotMatch(res.content[0].text, /Note: large write/);
 });
+
+// --- cap-6dy.22: truncation guard refuses rather than risk a duplicate -----
+
+test("create_object refuses a relation whose title search hit the 50-cap with no exact match (no duplicate)", async () => {
+  const { handler } = getCreateObject();
+  // 50 partial matches, none exactly "Standup" → resolveEntities returns truncated.
+  const partial = Array.from({ length: 50 }, (_, i) => ({
+    id: `m${i}`,
+    title: `Standup ${i}`,
+    structureId: "person",
+  }));
+  let created = false;
+  installFetch(
+    router({
+      search: { Standup: partial },
+      createId: "task-1",
+      onCreate: () => { created = true; }
+    })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    relations: { assignee: "Standup" },
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /could not confirm/i);
+  assert.match(res.content[0].text, /50 results/);
+  assert.equal(created, false, "fail-before-create: nothing written when a relation is unconfirmable");
+});
