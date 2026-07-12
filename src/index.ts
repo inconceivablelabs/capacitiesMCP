@@ -5,7 +5,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CapacitiesClient } from "./client/capacities.js";
 import { setupSearchTools } from "./tools/search.js";
-import { setupCreationTools } from "./tools/create.js";
 import { setupDailyNoteTools } from "./tools/daily-note.js";
 import { setupWebLinkTools } from "./tools/weblink.js";
 import { setupObjectTools } from "./tools/object.js";
@@ -31,7 +30,6 @@ async function main() {
 
   // Setup tools
   setupSearchTools(server, capacitiesClient);
-  setupCreationTools(server, capacitiesClient);
   setupDailyNoteTools(server, capacitiesClient);
   setupWebLinkTools(server, capacitiesClient);
   setupObjectTools(server, capacitiesClient);

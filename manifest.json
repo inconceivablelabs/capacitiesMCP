@@ -85,10 +85,6 @@
     {
       "name": "add_to_daily_note",
       "description": "Append markdown to today's daily note"
-    },
-    {
-      "name": "create_structured_note",
-      "description": "Legacy: create a markdown-template note in the daily note (meeting, research, weekly-review)"
     }
   ],
   "compatibility": {

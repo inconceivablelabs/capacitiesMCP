@@ -60,8 +60,6 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   classifies linked / unmatched / ambiguous; never guesses.
 - **`weblink.ts`**: `save_weblink` (`POST /object/url`, auto-fetch + title/description override).
 - **`daily-note.ts`**: `add_to_daily_note`.
-- **`create.ts`**: `create_structured_note` (legacy markdown-template-into-daily-note; candidate
-  to fold into `create_object`/`add_to_daily_note`).
 - **`descriptions.ts`**: `MARKDOWN_BODY_NOTE` — single-sourced body-conventions blurb reused in
   the body-accepting tool descriptions.
 
@@ -94,8 +92,7 @@ Objects have two content layers, handled differently — this is the central men
 
 ### Available MCP Tools
 `search_content`, `list_spaces`, `get_space_info`, `create_object`, `update_object`,
-`get_object`, `append_to_object`, `delete_object`, `save_weblink`, `add_to_daily_note`
-(+ legacy `create_structured_note`).
+`get_object`, `append_to_object`, `delete_object`, `save_weblink`, `add_to_daily_note`.
 
 ### Error Handling
 - `CapacitiesAPIError(code, message, details)` — codes `RATE_LIMIT_EXCEEDED`,
@@ -142,7 +139,7 @@ Notes: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`; the pack tool no
 format — Claude Desktop accepts both. The `.mcpbignore` must exclude root `node_modules/` (runtime
 deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads/`,
 `.private-journal/`, `.git/`) — otherwise they leak into the public artifact. Verify after packing:
-`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 11 tools, and the
+`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 10 tools, and the
 archive contains no `.private-journal/`/`.beads/`.
 
 ### Deployment (mcp-gateway)
