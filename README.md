@@ -1,10 +1,10 @@
 # Capacities MCP Server
 
-An MCP server for [Capacities](https://capacities.io) — search, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
+An MCP server for [Capacities](https://capacities.io): search, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
 
 > **⚠️ Upgrade to 2.x.** Version **2.x runs on the Capacities v2 REST API**. Version **1.x used the
-> Capacities Beta API, which Capacities discontinues on September 1, 2026** — 1.x builds (and any
-> `.dxt` packaged before v2.0.0) will **stop working** on that date. Reinstall the current
+> Capacities Beta API, which Capacities discontinues on September 1, 2026.** On that date, 1.x builds
+> (and any `.dxt` packaged before v2.0.0) **stop working**. Reinstall the current
 > `capacities-desktop-extension.dxt` (v2.x) to keep the integration working. See the
 > [Capacities API notice](https://docs.capacities.io/developer/api).
 
@@ -23,7 +23,7 @@ Choose the option that fits your setup:
 2. In Claude Desktop: Settings → Extensions → Import Extension
 3. Select the `.dxt` file and enter your API token when prompted
 
-All dependencies are bundled — no additional setup needed.
+All dependencies are bundled; no additional setup needed.
 
 ### Option 2: Run from Source
 
@@ -55,22 +55,22 @@ Then add to your MCP client config (e.g. Claude Desktop's `claude_desktop_config
 For running as a persistent service (e.g. behind an MCP gateway):
 
 ```bash
-cd server
-docker build -t capacities-mcp .
+# Build from the repo root: the Dockerfile copies from both src/ and server/.
+docker build -f server/Dockerfile -t capacities-mcp .
 docker run -d \
   -e CAPACITIES_API_TOKEN=your_token_here \
   capacities-mcp
 ```
 
-The Docker image uses `server/` which contains only the runtime package and compiled output — no source or dev dependencies.
+The Docker image uses `server/`, which contains only the runtime package and compiled output, with no source or dev dependencies.
 
-## Available Tools
+## Available tools
 
 | Tool | Description |
 |------|-------------|
 | `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`) |
 | `list_spaces` | Show the space your API token is scoped to |
-| `get_space_info` | List the space's structures — their properties, label options, and relation targets |
+| `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
 | `update_object` | Update an existing object's properties/relations (replaces each named property's value) and append a body |
 | `get_object` | Read an object as Markdown (frontmatter + body) |
@@ -89,9 +89,9 @@ Objects in Capacities hold two kinds of content, and the tools treat them differ
 - **Properties** — the object's *typed fields*: title, text, dates, numbers, **labels**
   (e.g. a task's Status, a weblink's Category), and **entity relations** (tags, a meeting's
   attendees). Set these with the `properties` / `labels` / `relations` inputs on
-  `create_object` / `update_object`, keyed by property id (get the ids, label options, and
-  relation targets from `get_space_info`). **Relations and labels are set by *name* and
-  resolved strictly** — an unknown name is an error, never a guess; pass
+  `create_object` / `update_object`, keyed by property name or id (get them, plus label options
+  and relation targets, from `get_space_info`). **Relations and labels are set by *name* and
+  resolved strictly**: an unknown name is an error, never a guess; pass
   `create_missing_relations: true` to auto-create unmatched relation targets.
 - **Body** — freeform Markdown, set via the `body` / `notes` / `content` / `markdown`
   parameter.
@@ -107,9 +107,9 @@ Any body/notes field supports Capacities' inline conventions:
 
 | Syntax | Effect | Creates an object? |
 |--------|--------|--------------------|
-| `() text` | Creates a **Task** and links it into the body | **Yes** — a Task |
-| `#tag` | Creates or links a **Tag** | **Yes** — a Tag, if new |
-| `[[Name]]` | Links an **existing** object by title | **No** — renders as plain text if no such object exists |
+| `() text` | Creates a **Task** and links it into the body | **Yes**, a Task |
+| `#tag` | Creates or links a **Tag** | **Yes**, a Tag if new |
+| `[[Name]]` | Links an **existing** object by title | **No**; plain text if no such object exists |
 
 Use `[[Name]]` to reference something that already exists; use `() ` / `#` when you *intend*
 to create the task/tag.
@@ -118,8 +118,8 @@ to create the task/tag.
 
 `save_weblink` creates a Weblink from a URL and auto-fetches the page's title and description;
 you can override `title` and `description` at save time. **Those are the only properties
-settable on a weblink.** The Capacities API currently treats *media* objects — weblinks, PDFs,
-images, audio, files — as **create-only**: they cannot be updated after creation, so **tags,
+settable on a weblink.** The Capacities API currently treats *media* objects (weblinks, PDFs,
+images, audio, files) as **create-only**: they cannot be updated after creation, so **tags,
 Category, and Topic cannot be set on a weblink through the API.** To tag a weblink today, put a
 `#tag` in its `notes` (this associates a Tag via the body).
 
@@ -136,7 +136,7 @@ Category, and Topic cannot be set on a weblink through the API.** To tag a webli
 | `CAPACITIES_API_BASE_URL` | No | `https://api.capacities.io` |
 | `LOG_LEVEL` | No | `info` |
 
-## Project Structure
+## Project structure
 
 ```
 capacitiesMCP/
@@ -166,4 +166,4 @@ See [CLAUDE.md](./CLAUDE.md) for architecture details.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
