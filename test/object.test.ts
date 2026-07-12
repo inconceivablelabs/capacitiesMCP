@@ -190,11 +190,13 @@ function router(opts: {
   markdown?: { id: string; structureId: string; markdown: string }; // GET /object/markdown?id=
   markdownFail?: { status: number; text: string };
   deleteFail?: { status: number; text: string };
+  // structure override (cap property-name-keying tests, e.g. id/name collisions):
+  structures?: any;
 }) {
   return (call: CapturedCall): RouteResponse => {
     const method = call.opts?.method ?? "GET";
     if (call.url.endsWith("/space/structures")) {
-      return { body: structuresPayload() };
+      return { body: opts.structures ?? structuresPayload() };
     }
     // GET /object/markdown?id=… → object rendered as Markdown (get_object).
     if (call.url.includes("/object/markdown?id=") && method === "GET") {
@@ -815,7 +817,7 @@ test("update_object: PATCHes only the named props with correct wrappers", async 
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     title: "Renamed Task",
     properties: { note: "updated" },
     labels: { status: "Done" },
@@ -861,7 +863,7 @@ test("update_object: replace-audit reports prior values for multi-value props", 
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     relations: { assignee: "Alice" },
     labels: { tags: ["Beta"] },
     create_missing_relations: false
@@ -881,7 +883,7 @@ test("update_object: unknown property -> isError, no PATCH", async () => {
   const calls = installFetch(router({ getObject: objectFixture({}, "RootTask") }));
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     properties: { nope: "x" },
     create_missing_relations: false
   });
@@ -900,7 +902,7 @@ test("update_object: read-only property -> isError, no PATCH", async () => {
   const calls = installFetch(router({ getObject: objectFixture({}, "RootTask") }));
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     properties: { count: 5 },
     create_missing_relations: false
   });
@@ -922,7 +924,7 @@ test("update_object: unmatched relation with create=false -> isError, no PATCH",
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     relations: { assignee: "Ghost" },
     create_missing_relations: false
   });
@@ -951,7 +953,7 @@ test("update_object: create_missing_relations:true creates the target then links
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     relations: { assignee: "Newbie" },
     create_missing_relations: true
   });
@@ -993,7 +995,7 @@ test("update_object: a co-occurring problem aborts BEFORE any entity is auto-cre
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     labels: { status: "Nope" }, // unknown option -> a problem
     relations: { assignee: "Ghost" }, // unmatched -> would auto-create
     create_missing_relations: true
@@ -1022,7 +1024,7 @@ test("update_object: GET 404 -> isError, no PATCH", async () => {
   );
 
   const res = await handler({
-    id: "missing",
+    objectId: "missing",
     title: "X",
     create_missing_relations: false
   });
@@ -1044,7 +1046,7 @@ test("update_object: body is appended via /blocks/append after PATCH", async () 
   );
 
   const res = await handler({
-    id: "obj-1",
+    objectId: "obj-1",
     title: "New Title",
     body: "some notes",
     create_missing_relations: false
@@ -1071,7 +1073,7 @@ test("update_object: no fields provided -> friendly no-op, no GET/PATCH", async 
   const { handler } = getUpdateObject();
   const calls = installFetch(router({}));
 
-  const res = await handler({ id: "obj-1", create_missing_relations: false });
+  const res = await handler({ objectId: "obj-1", create_missing_relations: false });
 
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /Nothing to update/);
@@ -1086,7 +1088,7 @@ test("append_to_object: POSTs /blocks/append with exactly {id, markdown}", async
   const { handler } = getTool("append_to_object");
   const calls = installFetch(router({}));
 
-  const res = await handler({ id: "obj-1", markdown: "some notes" });
+  const res = await handler({ objectId: "obj-1", markdown: "some notes" });
 
   assert.equal(res.isError, undefined);
   const appendCall = calls.find(c => c.url.endsWith("/blocks/append"));
@@ -1111,7 +1113,7 @@ test("get_object: GETs /object/markdown?id= (url-encoded) and returns the markdo
     })
   );
 
-  const res = await handler({ id: "obj a/b" });
+  const res = await handler({ objectId: "obj a/b" });
 
   assert.equal(res.isError, undefined);
   const getCall = calls.find(
@@ -1129,7 +1131,7 @@ test("delete_object: default hard_delete=false → DELETE with hardDelete=false,
   const { handler } = getTool("delete_object");
   const calls = installFetch(router({}));
 
-  const res = await handler({ id: "obj-1", hard_delete: false });
+  const res = await handler({ objectId: "obj-1", hard_delete: false });
 
   assert.equal(res.isError, undefined);
   const delCall = calls.find(c => c.opts?.method === "DELETE");
@@ -1144,7 +1146,7 @@ test("delete_object: hard_delete=true → DELETE with hardDelete=true, permanent
   const { handler } = getTool("delete_object");
   const calls = installFetch(router({}));
 
-  const res = await handler({ id: "obj-1", hard_delete: true });
+  const res = await handler({ objectId: "obj-1", hard_delete: true });
 
   assert.equal(res.isError, undefined);
   const delCall = calls.find(c => c.opts?.method === "DELETE");
@@ -1161,8 +1163,290 @@ test("get_object: non-ok response → isError with surfaced body", async () => {
     router({ markdownFail: { status: 404, text: "cap_not_found: no such object" } })
   );
 
-  const res = await handler({ id: "missing" });
+  const res = await handler({ objectId: "missing" });
 
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /cap_not_found: no such object/);
+});
+
+// === D1: `id` -> `objectId` rename on the four object-targeting tools ======
+
+test("get_object: accepts objectId param, GETs /object/markdown?id=<objectId>", async () => {
+  const { handler } = getTool("get_object");
+  const calls = installFetch(
+    router({ markdown: { id: "obj-42", structureId: "RootTask", markdown: "Body text" } })
+  );
+
+  const res = await handler({ objectId: "obj-42" });
+
+  assert.equal(res.isError, undefined);
+  const getCall = calls.find(
+    c => c.url.includes("/object/markdown?id=") && (c.opts?.method ?? "GET") === "GET"
+  );
+  assert.ok(getCall, "GET /object/markdown must happen");
+  assert.match(getCall!.url, /\/object\/markdown\?id=obj-42$/);
+  assert.match(res.content[0].text, /Body text/);
+});
+
+test("append_to_object: accepts objectId param, POSTs /blocks/append with {id: objectId, markdown}", async () => {
+  const { handler } = getTool("append_to_object");
+  const calls = installFetch(router({}));
+
+  const res = await handler({ objectId: "obj-99", markdown: "some notes" });
+
+  assert.equal(res.isError, undefined);
+  const appendCall = calls.find(c => c.url.endsWith("/blocks/append"));
+  assert.ok(appendCall, "POST /blocks/append must happen");
+  const body = JSON.parse(appendCall!.opts.body);
+  assert.deepEqual(body, { id: "obj-99", markdown: "some notes" });
+  assert.match(res.content[0].text, /obj-99/);
+});
+
+test("delete_object: accepts objectId param, DELETEs /object?id=<objectId>", async () => {
+  const { handler } = getTool("delete_object");
+  const calls = installFetch(router({}));
+
+  const res = await handler({ objectId: "obj-7", hard_delete: false });
+
+  assert.equal(res.isError, undefined);
+  const delCall = calls.find(c => c.opts?.method === "DELETE");
+  assert.ok(delCall, "DELETE /object must happen");
+  assert.match(delCall!.url, /\/object\?id=obj-7&hardDelete=false$/);
+});
+
+test("update_object: accepts objectId param, drives GET/PATCH/append by it", async () => {
+  const { handler } = getUpdateObject();
+  const calls = installFetch(router({ getObject: objectFixture({}, "RootTask") }));
+
+  const res = await handler({
+    objectId: "obj-55",
+    title: "New Title",
+    body: "note",
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+
+  const getCall = calls.find(
+    c => c.url.includes("/object?id=") && (c.opts?.method ?? "GET") === "GET"
+  );
+  assert.ok(getCall, "GET /object?id= must happen");
+  assert.match(getCall!.url, /\/object\?id=obj-55$/);
+
+  const patchCall = calls.find(c => c.url.endsWith("/object") && c.opts.method === "PATCH");
+  assert.ok(patchCall, "PATCH /object must happen");
+  const patched = JSON.parse(patchCall!.opts.body);
+  assert.equal(patched.id, "obj-55");
+
+  const appendCall = calls.find(c => c.url.endsWith("/blocks/append"));
+  assert.ok(appendCall, "append must happen");
+  const appendBody = JSON.parse(appendCall!.opts.body);
+  assert.equal(appendBody.id, "obj-55");
+
+  assert.match(res.content[0].text, /Updated Task obj-55/);
+});
+
+// === D2: resolve properties/labels/relations map keys by NAME or id ========
+
+test("create_object: scalar property keyed by NAME resolves to the real prop-def id", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { "Due Date": "2026-07-10T00:00:00Z" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.due, {
+    type: "date",
+    date: { start: "2026-07-10T00:00:00.000Z", dateResolution: "time" }
+  });
+  assert.equal(main.properties["Due Date"], undefined, "must not be keyed by the raw name");
+});
+
+test("create_object: label keyed by NAME resolves to the real prop-def id", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(router({ onCreate: b => createBodies.push(b) }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    labels: { Status: "Doing" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.status, {
+    type: "label",
+    label: [{ id: "s-doing", name: "Doing" }]
+  });
+  assert.equal(main.properties.Status, undefined, "must not be keyed by the raw name");
+});
+
+test("create_object: relation keyed by NAME resolves to the real prop-def id", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(
+    router({
+      search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] },
+      onCreate: b => createBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    relations: { Assignee: "Alice" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.assignee, { type: "entity", entity: [{ id: "p-alice" }] });
+  assert.equal(main.properties.Assignee, undefined, "must not be keyed by the raw name");
+});
+
+test("update_object: relation keyed by NAME resolves + PATCH body keyed by real id", async () => {
+  const { handler } = getUpdateObject();
+  const updateBodies: any[] = [];
+  installFetch(
+    router({
+      getObject: objectFixture({}, "RootTask"),
+      search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] },
+      onUpdate: b => updateBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    objectId: "obj-1",
+    relations: { Assignee: "Alice" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  assert.equal(updateBodies.length, 1);
+  assert.deepEqual(updateBodies[0].properties.assignee, {
+    type: "entity",
+    entity: [{ id: "p-alice" }]
+  });
+  assert.equal(updateBodies[0].properties.Assignee, undefined, "must not be keyed by the raw name");
+});
+
+test("back-compat: keying properties/labels/relations by the real prop-def id still works unchanged", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(
+    router({
+      search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] },
+      onCreate: b => createBodies.push(b)
+    })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { note: "hi" },
+    labels: { status: "Doing" },
+    relations: { assignee: "Alice" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.note, { type: "text", text: { value: "hi" } });
+  assert.deepEqual(main.properties.status, {
+    type: "label",
+    label: [{ id: "s-doing", name: "Doing" }]
+  });
+  assert.deepEqual(main.properties.assignee, { type: "entity", entity: [{ id: "p-alice" }] });
+});
+
+// id-wins fixture: a property with id "status" (name "Status") coexists with a
+// DIFFERENT property whose name is also, case-insensitively, "status".
+function idWinsStructuresPayload() {
+  return {
+    structures: [
+      {
+        id: "RootTask",
+        title: "Task",
+        pluralName: "Tasks",
+        labelColor: "blue",
+        collections: [],
+        propertyDefinitions: [
+          { id: "title", name: "Title", type: "title", writable: true },
+          { id: "status", name: "Status", type: "text", writable: true },
+          { id: "otherProp", name: "status", type: "text", writable: true }
+        ]
+      }
+    ]
+  };
+}
+
+test("id-wins: a key that exactly matches a prop-def id resolves to that id even when a different property's name also matches loosely", async () => {
+  const { handler } = getCreateObject();
+  const createBodies: any[] = [];
+  installFetch(
+    router({ structures: idWinsStructuresPayload(), onCreate: b => createBodies.push(b) })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { status: "value-for-status-id" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  const main = createBodies.find(b => b.structureId === "RootTask");
+  assert.deepEqual(main.properties.status, {
+    type: "text",
+    text: { value: "value-for-status-id" }
+  });
+  assert.equal(main.properties.otherProp, undefined);
+});
+
+// Ambiguous-name fixture: two DIFFERENT properties sharing the same name.
+function ambiguousStructuresPayload() {
+  return {
+    structures: [
+      {
+        id: "RootTask",
+        title: "Task",
+        pluralName: "Tasks",
+        labelColor: "blue",
+        collections: [],
+        propertyDefinitions: [
+          { id: "title", name: "Title", type: "title", writable: true },
+          { id: "propA", name: "Duplicate", type: "text", writable: true },
+          { id: "propB", name: "Duplicate", type: "text", writable: true }
+        ]
+      }
+    ]
+  };
+}
+
+test("ambiguous property name -> isError, nothing written", async () => {
+  const { handler } = getCreateObject();
+  const calls = installFetch(router({ structures: ambiguousStructuresPayload() }));
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "T",
+    properties: { Duplicate: "x" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /`Duplicate` is ambiguous/);
+  assert.equal(
+    calls.some(c => c.url.endsWith("/object") && c.opts.method === "POST"),
+    false
+  );
 });

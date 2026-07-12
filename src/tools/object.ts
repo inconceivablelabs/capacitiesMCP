@@ -29,6 +29,46 @@ function toArray<T>(v: T | T[]): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
+// --- Property-key resolution: NAME or id (D2) -------------------------------
+//
+// `properties`/`labels`/`relations` map keys accept either a property-def id
+// (exact match, checked first) or a property NAME (case-insensitive, matched
+// against the structure's propertyDefinitions). Structure is already in hand
+// (create_object/update_object both fetch space info), so this is free — no
+// extra API calls. Id wins outright over any looser name match (A3).
+export interface PropertyIndex {
+  byId: Map<string, PropertyDefinition>;
+  byName: Map<string, PropertyDefinition[]>;
+}
+
+function buildPropertyIndex(structure: CapacitiesStructure): PropertyIndex {
+  const byId = new Map<string, PropertyDefinition>();
+  const byName = new Map<string, PropertyDefinition[]>();
+  for (const p of structure.propertyDefinitions) {
+    byId.set(p.id, p);
+    const nameKey = normalize(p.name);
+    const arr = byName.get(nameKey) ?? [];
+    arr.push(p);
+    byName.set(nameKey, arr);
+  }
+  return { byId, byName };
+}
+
+type PropResolution = { def: PropertyDefinition } | { problem: string };
+
+function resolvePropertyKey(index: PropertyIndex, key: string): PropResolution {
+  const byId = index.byId.get(key);
+  if (byId) return { def: byId };
+  const matches = index.byName.get(normalize(key)) ?? [];
+  if (matches.length === 1) return { def: matches[0] };
+  if (matches.length > 1) {
+    return {
+      problem: `\`${key}\` is ambiguous — matches ${matches.length} properties by name; use the property id`
+    };
+  }
+  return { problem: `unknown property \`${key}\`` };
+}
+
 // --- Shared wrapper-building machinery (cap-6dy.12) ------------------------
 
 // A planned relation write. Resolution is READ-ONLY; `toCreate` names are
@@ -74,8 +114,7 @@ export async function buildWrappers(
 ): Promise<WrapperBuild> {
   const { title, properties, labels, relations, createMissingRelations } = inputs;
 
-  const propMap = new Map<string, PropertyDefinition>();
-  for (const p of structure.propertyDefinitions) propMap.set(p.id, p);
+  const propIndex = buildPropertyIndex(structure);
 
   const titlePropId =
     structure.propertyDefinitions.find(p => p.type === "title")?.id ?? "title";
@@ -90,19 +129,21 @@ export async function buildWrappers(
   const relationPlans: RelationPlan[] = [];
 
   // Scalar properties.
-  for (const [propId, value] of Object.entries(properties ?? {})) {
-    const def = propMap.get(propId);
-    if (!def) {
-      problems.push(`unknown property \`${propId}\``);
+  for (const [key, value] of Object.entries(properties ?? {})) {
+    const resolved = resolvePropertyKey(propIndex, key);
+    if ("problem" in resolved) {
+      problems.push(resolved.problem);
       continue;
     }
+    const def = resolved.def;
+    const propId = def.id;
     if (!def.writable) {
-      problems.push(`\`${propId}\` is read-only`);
+      problems.push(`\`${key}\` is read-only`);
       continue;
     }
     if (def.type === "label" || def.type === "entity") {
       problems.push(
-        `use the ${def.type === "label" ? "labels" : "relations"} map for \`${propId}\``
+        `use the ${def.type === "label" ? "labels" : "relations"} map for \`${key}\``
       );
       continue;
     }
@@ -123,7 +164,7 @@ export async function buildWrappers(
       case "number": {
         const n = Number(value);
         if (Number.isNaN(n)) {
-          problems.push(`\`${propId}\` value is not a number: ${String(value)}`);
+          problems.push(`\`${key}\` value is not a number: ${String(value)}`);
           break;
         }
         wrappers[propId] = { type: "number", number: { value: n } };
@@ -141,7 +182,7 @@ export async function buildWrappers(
           } else if (s === "false") {
             b = false;
           } else {
-            problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+            problems.push(`\`${key}\` value is not a boolean: ${String(value)}`);
             break;
           }
         } else if (typeof value === "number") {
@@ -150,11 +191,11 @@ export async function buildWrappers(
           } else if (value === 0) {
             b = false;
           } else {
-            problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+            problems.push(`\`${key}\` value is not a boolean: ${String(value)}`);
             break;
           }
         } else {
-          problems.push(`\`${propId}\` value is not a boolean: ${String(value)}`);
+          problems.push(`\`${key}\` value is not a boolean: ${String(value)}`);
           break;
         }
         wrappers[propId] = { type: "boolean", boolean: { value: b } };
@@ -164,13 +205,13 @@ export async function buildWrappers(
       case "date": {
         if (typeof value !== "string") {
           problems.push(
-            `\`${propId}\` date must be an ISO-8601 string, got ${typeof value}: ${String(value)}`
+            `\`${key}\` date must be an ISO-8601 string, got ${typeof value}: ${String(value)}`
           );
           break;
         }
         const parsed = new Date(value);
         if (Number.isNaN(parsed.getTime())) {
-          problems.push(`\`${propId}\` value is not a valid date: ${String(value)}`);
+          problems.push(`\`${key}\` value is not a valid date: ${String(value)}`);
           break;
         }
         const iso = parsed.toISOString();
@@ -185,24 +226,26 @@ export async function buildWrappers(
   }
 
   // Labels (set by option NAME).
-  for (const [propId, rawNames] of Object.entries(labels ?? {})) {
-    const def = propMap.get(propId);
-    if (!def) {
-      problems.push(`unknown property \`${propId}\``);
+  for (const [key, rawNames] of Object.entries(labels ?? {})) {
+    const resolved = resolvePropertyKey(propIndex, key);
+    if ("problem" in resolved) {
+      problems.push(resolved.problem);
       continue;
     }
+    const def = resolved.def;
+    const propId = def.id;
     if (!def.writable) {
-      problems.push(`\`${propId}\` is read-only`);
+      problems.push(`\`${key}\` is read-only`);
       continue;
     }
     if (def.type !== "label") {
-      problems.push(`\`${propId}\` is not a label property`);
+      problems.push(`\`${key}\` is not a label property`);
       continue;
     }
 
     const names = toArray(rawNames);
     if (!def.multiple && names.length > 1) {
-      problems.push(`\`${propId}\` is single-select`);
+      problems.push(`\`${key}\` is single-select`);
       continue;
     }
 
@@ -213,7 +256,7 @@ export async function buildWrappers(
       const opt = options.find(o => normalize(o.name) === normalize(name));
       if (!opt) {
         const valid = options.map(o => o.name).join(", ");
-        problems.push(`unknown option \`${name}\` for \`${propId}\`; valid: ${valid}`);
+        problems.push(`unknown option \`${name}\` for \`${key}\`; valid: ${valid}`);
         hadUnknown = true;
         continue;
       }
@@ -229,18 +272,20 @@ export async function buildWrappers(
   // READ-ONLY — any auto-creation of missing targets is DEFERRED to
   // finalizeRelationPlans (after the caller's problem gate), so a validation
   // failure in a later property never leaves orphaned entities behind.
-  for (const [propId, rawNames] of Object.entries(relations ?? {})) {
-    const def = propMap.get(propId);
-    if (!def) {
-      problems.push(`unknown property \`${propId}\``);
+  for (const [key, rawNames] of Object.entries(relations ?? {})) {
+    const resolved = resolvePropertyKey(propIndex, key);
+    if ("problem" in resolved) {
+      problems.push(resolved.problem);
       continue;
     }
+    const def = resolved.def;
+    const propId = def.id;
     if (!def.writable) {
-      problems.push(`\`${propId}\` is read-only`);
+      problems.push(`\`${key}\` is read-only`);
       continue;
     }
     if (def.type !== "entity") {
-      problems.push(`\`${propId}\` is not a relation (entity) property`);
+      problems.push(`\`${key}\` is not a relation (entity) property`);
       continue;
     }
 
@@ -340,8 +385,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
       description:
         "Create a new object of any structure in your Capacities space. " +
         "Call `get_space_info` first to get structure_id, property ids, label options, and relation target types. " +
-        "Scalar properties (text/url/number/boolean/date) go in `properties` keyed by property id; dates are ISO-8601 strings. " +
-        "Labels go in `labels` (keyed by property id, values are option NAMES) and relations go in `relations` (keyed by property id, values are entity NAMES). " +
+        "Scalar properties (text/url/number/boolean/date) go in `properties` keyed by property NAME or id; dates are ISO-8601 strings. " +
+        "Labels go in `labels` (keyed by property NAME or id, values are option NAMES) and relations go in `relations` (keyed by property NAME or id, values are entity NAMES). " +
         "Relations and labels are set by NAME and resolved strictly — an unknown name is an error, never a guess. " +
         "Pass `create_missing_relations: true` to auto-create unmatched relation targets. " +
         "`update_object` (not this tool) replaces; this creates.",
@@ -354,16 +399,16 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           .record(z.union([z.string(), z.number(), z.boolean()]))
           .optional()
           .describe(
-            "Scalar props keyed by property-def id: text/url/number/boolean/date. Date = ISO-8601 string."
+            "Scalar props keyed by property NAME or id: text/url/number/boolean/date. Date = ISO-8601 string."
           ),
         labels: z
           .record(z.union([z.string(), z.array(z.string())]))
           .optional()
-          .describe("Label props keyed by property-def id; value(s) are option NAME(s)"),
+          .describe("Label props keyed by property NAME or id; value(s) are option NAME(s)"),
         relations: z
           .record(z.union([z.string(), z.array(z.string())]))
           .optional()
-          .describe("Entity (relation) props keyed by property-def id; value(s) are entity NAME(s), resolved strictly"),
+          .describe("Entity (relation) props keyed by property NAME or id; value(s) are entity NAME(s), resolved strictly"),
         create_missing_relations: z
           .boolean()
           .default(false)
@@ -512,30 +557,33 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
     {
       title: "Update Capacities Object",
       description:
-        "Update properties of an existing object (PATCH). Only the properties you name are changed; " +
-        "unnamed properties are left intact. WARNING: for a named property this REPLACES its value — it " +
-        "does NOT append. Naming a multi-value relation/label drops the prior list and sets exactly what " +
-        "you pass. To ADD to a relation, first read the current values (this tool reports them) and pass " +
-        "the full desired list. Use append_to_object for body/notes. " +
+        "Replace typed properties of an existing object (PATCH /object). Only the properties you name are " +
+        "changed; unnamed properties are left intact. WARNING: for a named property this REPLACES its value " +
+        "— it does NOT append. Naming a multi-value relation/label drops the prior list and sets exactly " +
+        "what you pass. To ADD to a relation, first read the current values (this tool reports them) and " +
+        "pass the full desired list. The optional `body` param is a convenience: after the PATCH, it also " +
+        "appends markdown to the object's body (POST /blocks/append) — the same additive write " +
+        "`append_to_object` performs on its own. " +
         "Labels and relations are set by NAME and resolved strictly — an unknown name is an error. " +
+        "`properties`/`labels`/`relations` map keys accept a property NAME or id. " +
         "Pass `create_missing_relations: true` to auto-create unmatched relation targets.",
       inputSchema: {
-        id: z.string().describe("Id of the object to update"),
+        objectId: z.string().describe("objectId of the object to update"),
         title: z.string().optional().describe("New title for the object"),
         properties: z
           .record(z.union([z.string(), z.number(), z.boolean()]))
           .optional()
           .describe(
-            "Scalar props keyed by property-def id: text/url/number/boolean/date. REPLACES each named value."
+            "Scalar props keyed by property NAME or id: text/url/number/boolean/date. REPLACES each named value."
           ),
         labels: z
           .record(z.union([z.string(), z.array(z.string())]))
           .optional()
-          .describe("Label props keyed by property-def id; value(s) are option NAME(s). REPLACES the named prop."),
+          .describe("Label props keyed by property NAME or id; value(s) are option NAME(s). REPLACES the named prop."),
         relations: z
           .record(z.union([z.string(), z.array(z.string())]))
           .optional()
-          .describe("Entity (relation) props keyed by property-def id; value(s) are entity NAME(s). REPLACES the named prop."),
+          .describe("Entity (relation) props keyed by property NAME or id; value(s) are entity NAME(s). REPLACES the named prop."),
         create_missing_relations: z
           .boolean()
           .default(false)
@@ -545,7 +593,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
       }
     },
     async ({
-      id,
+      objectId,
       title,
       properties,
       labels,
@@ -569,7 +617,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             content: [
               {
                 type: "text",
-                text: `Nothing to update for ${id} — provide a title, properties, labels, relations, body, or collections.`
+                text: `Nothing to update for ${objectId} — provide a title, properties, labels, relations, body, or collections.`
               }
             ]
           };
@@ -577,7 +625,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
 
         // 1. Read the current STRUCTURED object (typed-wrapper properties) — this
         //    yields structureId and the prior values needed for the replace-audit.
-        const current = await client.getObject(id);
+        const current = await client.getObject(objectId);
 
         // 2. Resolve the object's structure from space info.
         const { structures } = await client.getSpaceInfo();
@@ -588,7 +636,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             content: [
               {
                 type: "text",
-                text: `Structure "${current.structureId}" for object ${id} not found. Available structures: ${available}`
+                text: `Structure "${current.structureId}" for object ${objectId} not found. Available structures: ${available}`
               }
             ],
             isError: true
@@ -607,8 +655,9 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         //    success message can show `replaced <name>: <prior> → <new>`. This
         //    operationalizes the replace warning. Best-effort: structured entity
         //    values carry ids (not titles), so relations report a prior count.
-        const propMap = new Map<string, PropertyDefinition>();
-        for (const p of structure.propertyDefinitions) propMap.set(p.id, p);
+        //    Keys accept a property NAME or id (D2) — resolve to the real id
+        //    before indexing into `current.properties`, which the API keys by id.
+        const propIndex = buildPropertyIndex(structure);
 
         const replaceAudit: string[] = [];
         const namedMultiKeys = [
@@ -616,9 +665,10 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           ...Object.keys(relations ?? {})
         ];
         for (const key of namedMultiKeys) {
-          const def = propMap.get(key);
-          if (!def) continue; // already surfaced as a problem
-          const prior = (current.properties ?? {})[key] as any;
+          const resolved = resolvePropertyKey(propIndex, key);
+          if ("problem" in resolved) continue; // already surfaced as a problem
+          const def = resolved.def;
+          const prior = (current.properties ?? {})[def.id] as any;
           if (def.type === "label") {
             const priorNames: string[] = Array.isArray(prior?.label)
               ? prior.label.map((o: any) => o?.name).filter(Boolean)
@@ -683,7 +733,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
 
         // 7. PATCH the object (merges by key; replaces each named prop's value).
         const updated = await client.updateObject({
-          id,
+          id: objectId,
           properties: wrappers,
           ...(collections ? { collections } : {})
         });
@@ -692,7 +742,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         let bodyStatus = "";
         if (body) {
           try {
-            await client.appendBlocks({ id: updated.id ?? id, markdown: body });
+            await client.appendBlocks({ id: updated.id ?? objectId, markdown: body });
             bodyStatus = "\nBody: appended";
           } catch (e) {
             bodyStatus = `\nBody: append FAILED — ${
@@ -716,7 +766,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             {
               type: "text",
               text:
-                `Updated ${structure.title} ${id}` +
+                `Updated ${structure.title} ${objectId}` +
                 summaryLine +
                 auditLine +
                 createdLine +
@@ -747,19 +797,20 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
     {
       title: "Append to Capacities Object",
       description:
-        "Append markdown content (body/blocks) to the END of an existing object " +
-        "WITHOUT changing its properties. Use update_object to change properties; " +
-        "use this to add notes/body.",
+        "Append markdown to the END of an existing object's body (POST /blocks/append) — additive, never " +
+        "removes, and never touches typed properties. This is the body counterpart to update_object, which " +
+        "replaces typed properties (scalars/labels/relations) via PATCH /object. Use update_object to change " +
+        "properties; use this to add notes/body.",
       inputSchema: {
-        id: z.string().describe("Id of the object to append to"),
+        objectId: z.string().describe("objectId of the object to append to"),
         markdown: z.string().describe("Markdown content to append to the object's body." + MARKDOWN_BODY_NOTE)
       }
     },
-    async ({ id, markdown }) => {
+    async ({ objectId, markdown }) => {
       try {
-        await client.appendBlocks({ id, markdown });
+        await client.appendBlocks({ id: objectId, markdown });
         return {
-          content: [{ type: "text", text: `Appended body to object ${id}.` }]
+          content: [{ type: "text", text: `Appended body to object ${objectId}.` }]
         };
       } catch (error) {
         const message =
@@ -783,12 +834,12 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
       description:
         "Read an object rendered as Markdown (YAML frontmatter of its properties + body).",
       inputSchema: {
-        id: z.string().describe("Id of the object to read")
+        objectId: z.string().describe("objectId of the object to read")
       }
     },
-    async ({ id }) => {
+    async ({ objectId }) => {
       try {
-        const obj = await client.getObjectMarkdown(id);
+        const obj = await client.getObjectMarkdown(objectId);
         const header = obj.structureId ? `Structure: ${obj.structureId}\n\n` : "";
         return {
           content: [{ type: "text", text: header + (obj.markdown ?? "") }]
@@ -817,7 +868,7 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         "recoverable in Capacities. Pass hard_delete=true to permanently delete — " +
         "this cannot be undone.",
       inputSchema: {
-        id: z.string().describe("Id of the object to delete"),
+        objectId: z.string().describe("objectId of the object to delete"),
         hard_delete: z
           .boolean()
           .default(false)
@@ -826,14 +877,14 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           )
       }
     },
-    async ({ id, hard_delete }) => {
+    async ({ objectId, hard_delete }) => {
       try {
-        await client.deleteObject(id, hard_delete);
+        await client.deleteObject(objectId, hard_delete);
         const disposition = hard_delete
           ? "permanently deleted (cannot be undone)"
           : "moved to trash (recoverable in Capacities)";
         return {
-          content: [{ type: "text", text: `Object ${id} ${disposition}.` }]
+          content: [{ type: "text", text: `Object ${objectId} ${disposition}.` }]
         };
       } catch (error) {
         const message =
