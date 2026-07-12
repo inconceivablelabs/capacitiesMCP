@@ -2,17 +2,33 @@
 // File: src/client/capacities.ts - Using native fetch
 import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject } from "./types.js";
 
+// Rate-limit window length (ms). Exported so composite-write callers can seed a
+// bounded-wait budget of one window (cap-6dy.19).
+export const WINDOW_MS = 60000;
+
+// A mutable, operation-level bounded-wait budget. A single instance is shared
+// across ALL paced calls in one composite write, so cumulative internal sleep is
+// capped at its initial `remainingMs` (cap-6dy.19).
+export type WaitBudget = { remainingMs: number };
+
 export class CapacitiesClient {
   private baseUrl: string;
   private apiToken: string;
   private rateLimiter: RateLimiter;
   private logLevel: string;
 
-  constructor(config: { apiToken: string; baseUrl: string; logLevel?: string }) {
+  constructor(config: {
+    apiToken: string;
+    baseUrl: string;
+    logLevel?: string;
+    // Injectable time source for testing bounded-wait pacing without real sleeps.
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  }) {
     this.baseUrl = config.baseUrl;
     this.apiToken = config.apiToken;
     this.logLevel = config.logLevel ?? "info";
-    this.rateLimiter = new RateLimiter();
+    this.rateLimiter = new RateLimiter({ now: config.now, sleep: config.sleep });
   }
 
   private debug(...args: unknown[]) {
@@ -20,12 +36,20 @@ export class CapacitiesClient {
   }
 
   private async makeRequest<T>(
-    endpoint: string, 
-    options: RequestInit = {}
+    endpoint: string,
+    options: RequestInit = {},
+    // When a budget is supplied (composite writes only), the limiter may sleep
+    // across one window reset within that budget instead of throwing. Default
+    // (no budget) behavior is byte-for-byte the pre-existing throw path.
+    pace?: WaitBudget
   ): Promise<T> {
     // Rate limiting
     const endpointType = this.getEndpointType(endpoint);
-    await this.rateLimiter.waitForSlot(endpointType);
+    if (pace) {
+      await this.rateLimiter.acquireWithWait(endpointType, pace);
+    } else {
+      await this.rateLimiter.waitForSlot(endpointType);
+    }
 
     const response = await fetch(`${this.baseUrl}${endpoint}`, {
       ...options,
@@ -120,7 +144,7 @@ export class CapacitiesClient {
     return this.makeRequest("/space/structures");
   }
 
-  async searchContent(options: SearchOptions): Promise<SearchResult[]> {
+  async searchContent(options: SearchOptions, pace?: WaitBudget): Promise<SearchResult[]> {
     // v2 search is a single request; spaceIds is ignored (token is single-space).
     const body: { query: string; structureIds?: string[]; limit?: number } = {
       query: options.query
@@ -133,9 +157,14 @@ export class CapacitiesClient {
       {
         method: "POST",
         body: JSON.stringify(body)
-      }
+      },
+      pace
     );
-    return response.results;
+    // Guard the empty-body/non-JSON 200 shape (makeRequest returns {success:true}):
+    // `results` would be undefined and blow up downstream `.filter`/`.length`
+    // (cap-6dy.20). Real zero-result search returns `{results:[]}`, so this is
+    // defensive — but it makes the return type honest.
+    return response.results ?? [];
   }
 
   // Returns the created CapacitiesObject. Typed as unknown so existing tool
@@ -168,11 +197,17 @@ export class CapacitiesClient {
     structureId: string;
     properties?: Record<string, unknown>;
     collections?: string[];
-  }): Promise<CapacitiesObject> {
-    return this.makeRequest<CapacitiesObject>("/object", {
+  }, pace?: WaitBudget): Promise<CapacitiesObject> {
+    const obj = await this.makeRequest<CapacitiesObject>("/object", {
       method: "POST",
       body: JSON.stringify(body)
-    });
+    }, pace);
+    // Guard the empty-body/non-JSON 200 shape: without an id we'd report
+    // "ID: undefined" and a follow-up appendBlocks({id: undefined}) (cap-6dy.20).
+    if (!obj || typeof obj.id !== "string" || obj.id.length === 0) {
+      throw new CapacitiesAPIError("API_ERROR", "create returned no object id", { body: obj });
+    }
+    return obj;
   }
 
   // Reads the STRUCTURED object (typed-wrapper properties + blocks). update_object
@@ -188,11 +223,16 @@ export class CapacitiesClient {
     id: string;
     properties?: Record<string, unknown>;
     collections?: string[];
-  }): Promise<CapacitiesObject> {
-    return this.makeRequest<CapacitiesObject>("/object", {
+  }, pace?: WaitBudget): Promise<CapacitiesObject> {
+    const obj = await this.makeRequest<CapacitiesObject>("/object", {
       method: "PATCH",
       body: JSON.stringify(body)
-    });
+    }, pace);
+    // Guard the empty-body/non-JSON 200 shape (see createObject) — cap-6dy.20.
+    if (!obj || typeof obj.id !== "string" || obj.id.length === 0) {
+      throw new CapacitiesAPIError("API_ERROR", "update returned no object id", { body: obj });
+    }
+    return obj;
   }
 
   // Appends markdown-converted blocks to an existing object (verified mechanism).
@@ -220,6 +260,11 @@ export class CapacitiesClient {
 
   async saveToDailyNote(options: SaveToDailyNoteOptions) {
     // v2 daily-note append returns HTTP 200 with an empty body (handled by makeRequest).
+    // cap-6dy.23: v1 sent origin:"mcp" here (set the note's origin icon). v2 dropped
+    // `origin` entirely — it is not accepted on /blocks/daily-note/append nor ANY v2
+    // write endpoint (verified against the live OpenAPI spec 2026-07-12). So the MCP
+    // origin marker is no longer settable via the API; nothing to re-add. (v2 also
+    // supports a `date` field here to target a specific day — not yet exposed.)
     return this.makeRequest("/blocks/daily-note/append", {
       method: "POST",
       body: JSON.stringify({
@@ -244,32 +289,70 @@ class RateLimiter {
     blocks: { maxRequests: 30, windowMs: 60000 }   // /blocks/*
   };
 
-  async waitForSlot(endpoint: EndpointType): Promise<void> {
+  // Injectable clock/sleep so bounded-wait pacing is testable without real time.
+  private now: () => number;
+  private sleep: (ms: number) => Promise<void>;
+
+  constructor(deps?: { now?: () => number; sleep?: (ms: number) => Promise<void> }) {
+    this.now = deps?.now ?? (() => Date.now());
+    this.sleep = deps?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  windowMsFor(endpoint: EndpointType): number {
+    return this.limits[endpoint].windowMs;
+  }
+
+  // Take a slot in the current window if one is free (opening a fresh window when
+  // the prior one has elapsed). Returns false without mutating when the window is
+  // full. Shared by both the throw path and the bounded-wait path.
+  private tryTake(endpoint: EndpointType): boolean {
     const limit = this.limits[endpoint];
-    const now = Date.now();
+    const now = this.now();
     const window = this.windows.get(endpoint);
 
     if (!window || now >= window.resetTime) {
-      this.windows.set(endpoint, {
-        requests: 1,
-        resetTime: now + limit.windowMs
-      });
-      return;
+      this.windows.set(endpoint, { requests: 1, resetTime: now + limit.windowMs });
+      return true;
     }
-
-    if (window.requests >= limit.maxRequests) {
-      // Surface a structured "retry in Ns" error instead of silently sleeping up
-      // to 60s. Same RATE_LIMIT_EXCEEDED code as the server-429 path; the
-      // details.retryAfterMs distinguishes the client-side preemptive case.
-      const retryAfterMs = window.resetTime - now;
-      throw new CapacitiesAPIError(
-        "RATE_LIMIT_EXCEEDED",
-        `Rate limited on ${endpoint} requests; retry in ${Math.ceil(retryAfterMs / 1000)}s`,
-        { retryAfterMs, category: endpoint }
-      );
-    }
-
+    if (window.requests >= limit.maxRequests) return false;
     window.requests++;
+    return true;
+  }
+
+  private throwRateLimited(endpoint: EndpointType): never {
+    const window = this.windows.get(endpoint);
+    const retryAfterMs = window ? window.resetTime - this.now() : this.limits[endpoint].windowMs;
+    throw new CapacitiesAPIError(
+      "RATE_LIMIT_EXCEEDED",
+      `Rate limited on ${endpoint} requests; retry in ${Math.ceil(retryAfterMs / 1000)}s`,
+      { retryAfterMs, category: endpoint }
+    );
+  }
+
+  async waitForSlot(endpoint: EndpointType): Promise<void> {
+    // Throw-immediately behavior (cap-6dy.8) — unchanged; used by every
+    // single-call site. Surfaces a structured "retry in Ns" error rather than
+    // silently sleeping up to 60s.
+    if (this.tryTake(endpoint)) return;
+    this.throwRateLimited(endpoint);
+  }
+
+  // Bounded-wait acquire for composite writes only (cap-6dy.19). If a slot is
+  // free, take it. If the window is full and the wait-to-reset fits in the
+  // operation's remaining budget, sleep across exactly one window reset, decrement
+  // the shared budget, then take a slot in the fresh window. Otherwise throw the
+  // same RATE_LIMIT_EXCEEDED as the throw path.
+  async acquireWithWait(endpoint: EndpointType, budget: WaitBudget): Promise<void> {
+    if (this.tryTake(endpoint)) return;
+
+    const window = this.windows.get(endpoint)!;
+    const resetIn = window.resetTime - this.now();
+    if (resetIn <= budget.remainingMs) {
+      await this.sleep(resetIn);
+      budget.remainingMs -= resetIn;
+      if (this.tryTake(endpoint)) return;
+    }
+    this.throwRateLimited(endpoint);
   }
 }
 

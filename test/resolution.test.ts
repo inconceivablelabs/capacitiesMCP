@@ -136,73 +136,7 @@ test("more than one exact match is ambiguous and never linked", async () => {
   ]);
 });
 
-// --- 6. create=true with single structureId -> creates + links ------------
-
-test("create=true with a single structureId calls createEntity and links the new id", async () => {
-  installSearchFetch({ Newbie: [] });
-  const client = newClient();
-
-  const createCalls: { name: string; structureId: string }[] = [];
-  const createEntity = async (name: string, structureId: string) => {
-    createCalls.push({ name, structureId });
-    return "created-1";
-  };
-
-  const res = await resolveEntities(client, ["Newbie"], ["person"], {
-    create: true,
-    createEntity,
-  });
-
-  assert.equal(createCalls.length, 1);
-  assert.deepEqual(createCalls[0], { name: "Newbie", structureId: "person" });
-  assert.deepEqual(res.linked, [{ name: "Newbie", id: "created-1" }]);
-  assert.deepEqual(res.unmatched, []);
-  assert.deepEqual(res.ambiguous, []);
-});
-
-// --- 7. create=true but ambiguous target structure -> unmatched -----------
-
-test("create=true with undefined structureIds cannot create; name is unmatched", async () => {
-  installSearchFetch({ Newbie: [] });
-  const client = newClient();
-
-  let called = false;
-  const createEntity = async () => {
-    called = true;
-    return "should-not-happen";
-  };
-
-  const res = await resolveEntities(client, ["Newbie"], undefined, {
-    create: true,
-    createEntity,
-  });
-
-  assert.equal(called, false, "createEntity must NOT be called without a single target structure");
-  assert.deepEqual(res.unmatched, ["Newbie"]);
-  assert.deepEqual(res.linked, []);
-});
-
-test("create=true with >1 structureIds cannot create; name is unmatched", async () => {
-  installSearchFetch({ Newbie: [] });
-  const client = newClient();
-
-  let called = false;
-  const createEntity = async () => {
-    called = true;
-    return "should-not-happen";
-  };
-
-  const res = await resolveEntities(client, ["Newbie"], ["person", "company"], {
-    create: true,
-    createEntity,
-  });
-
-  assert.equal(called, false);
-  assert.deepEqual(res.unmatched, ["Newbie"]);
-  assert.deepEqual(res.linked, []);
-});
-
-// --- 8. Dedup -------------------------------------------------------------
+// --- 6. Dedup -------------------------------------------------------------
 
 test("repeated names (varying case) are deduped: one search, one linked entry", async () => {
   const calls = installSearchFetch({
@@ -239,4 +173,59 @@ test("mixed: one linked, one unmatched, one ambiguous — all classified correct
   assert.equal(res.ambiguous.length, 1);
   assert.equal(res.ambiguous[0].name, "Bob");
   assert.equal(res.ambiguous[0].candidates.length, 2);
+});
+
+// --- 10. Truncation guard (cap-6dy.22) ------------------------------------
+
+test("no exact match but the search hit the 50-result cap -> truncated, NOT unmatched", async () => {
+  // 50 partial matches (none exactly "Standup") — a full/capped page with no exact.
+  const partial: SearchResult[] = Array.from({ length: 50 }, (_, i) => ({
+    id: `m${i}`,
+    title: `Standup ${i}`,
+    structureId: "meeting",
+  }));
+  installSearchFetch({ Standup: partial });
+  const client = newClient();
+
+  const res = await resolveEntities(client, ["Standup"], ["meeting"]);
+
+  assert.deepEqual(res.truncated, ["Standup"], "capped-with-no-exact is truncated");
+  assert.deepEqual(res.unmatched, [], "must NOT be classified as safe-to-create unmatched");
+  assert.deepEqual(res.linked, []);
+  assert.deepEqual(res.ambiguous, []);
+});
+
+test("no exact match below the cap -> unmatched (we saw the full result set)", async () => {
+  const partial: SearchResult[] = Array.from({ length: 49 }, (_, i) => ({
+    id: `m${i}`,
+    title: `Standup ${i}`,
+    structureId: "meeting",
+  }));
+  installSearchFetch({ Standup: partial });
+  const client = newClient();
+
+  const res = await resolveEntities(client, ["Standup"], ["meeting"]);
+
+  assert.deepEqual(res.unmatched, ["Standup"], "49 < cap -> confident not-found");
+  assert.deepEqual(res.truncated, []);
+});
+
+test("an exact match within a capped page is still linked, not truncated", async () => {
+  // 50 results, one of them an exact title -> exact-first classification wins.
+  const results: SearchResult[] = [
+    { id: "exact", title: "Standup", structureId: "meeting" },
+    ...Array.from({ length: 49 }, (_, i) => ({
+      id: `m${i}`,
+      title: `Standup ${i}`,
+      structureId: "meeting",
+    })),
+  ];
+  installSearchFetch({ Standup: results });
+  const client = newClient();
+
+  const res = await resolveEntities(client, ["Standup"], ["meeting"]);
+
+  assert.deepEqual(res.linked, [{ name: "Standup", id: "exact" }]);
+  assert.deepEqual(res.truncated, []);
+  assert.deepEqual(res.unmatched, []);
 });

@@ -13,20 +13,46 @@
 // /blocks/append.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { CapacitiesClient, CapacitiesAPIError } from "../client/capacities.js";
+import { CapacitiesClient, CapacitiesAPIError, WaitBudget, WINDOW_MS } from "../client/capacities.js";
 import { CapacitiesStructure, PropertyDefinition } from "../client/types.js";
-import { resolveEntities } from "./resolution.js";
+import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
 import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
+// Shared with resolution.ts — was a byte-identical local dupe (cap-6dy.24 #4).
+import { normalizeName as normalize } from "../utils/normalize.js";
 
 // Scalar property types handled by the `properties` map.
 const SCALAR_TYPES = new Set(["text", "url", "number", "boolean", "date"]);
 
-function normalize(name: string): string {
-  return name.trim().toLowerCase();
-}
-
 function toArray<T>(v: T | T[]): T[] {
   return Array.isArray(v) ? v : [v];
+}
+
+// Per-category rate-limit ceiling (30 requests / 60s window). Used for the
+// pre-flight demand check.
+const RATE_WINDOW_MAX = 30;
+
+// Pre-flight budget check (cap-6dy.19 D): if a composite write's resolution
+// searches or auto-creates exceed a single rate-limit window, the write still
+// proceeds (paced internally) but the success output carries an informational
+// warning nudging the LLM to split large writes. WARN, never reject.
+// `searchDemand` counts raw relation-name values (approximate — dedup happens
+// later); `objectDemand` counts planned auto-creates + the object itself.
+function largeBatchWarning(
+  relations: Record<string, string | string[]> | undefined,
+  relationPlans: RelationPlan[]
+): string | null {
+  let searchDemand = 0;
+  for (const v of Object.values(relations ?? {})) {
+    searchDemand += Array.isArray(v) ? v.length : 1;
+  }
+  const objectDemand = relationPlans.reduce((n, p) => n + p.toCreate.length, 0) + 1;
+  if (searchDemand > RATE_WINDOW_MAX || objectDemand > RATE_WINDOW_MAX) {
+    return (
+      `Note: large write — ${searchDemand} relation refs / ${objectDemand} target writes ` +
+      `against a 30-per-60s limit; may pace internally (up to ~60s). Split into smaller batches for snappier writes.`
+    );
+  }
+  return null;
 }
 
 // --- Property-key resolution: NAME or id (D2) -------------------------------
@@ -110,7 +136,10 @@ export interface WrapperInputs {
 export async function buildWrappers(
   client: CapacitiesClient,
   structure: CapacitiesStructure,
-  inputs: WrapperInputs
+  inputs: WrapperInputs,
+  // Operation-level bounded-wait budget, forwarded to relation resolution so its
+  // per-name searches are paced across a window reset (cap-6dy.19).
+  pace?: WaitBudget
 ): Promise<WrapperBuild> {
   const { title, properties, labels, relations, createMissingRelations } = inputs;
 
@@ -290,8 +319,9 @@ export async function buildWrappers(
     }
 
     const names = toArray(rawNames);
-    // No createEntity passed → resolveEntities performs no writes.
-    const r = await resolveEntities(client, names, def.allowedStructures, {});
+    // resolveEntities is write-free — it only classifies (linked/unmatched/
+    // ambiguous/truncated); auto-create is handled later by finalizeRelationPlans.
+    const r = await resolveEntities(client, names, def.allowedStructures, { pace });
 
     if (r.ambiguous.length > 0) {
       for (const a of r.ambiguous) {
@@ -300,6 +330,17 @@ export async function buildWrappers(
           `ambiguous relation \`${a.name}\` for \`${propId}\`: multiple matches: ${cands}`
         );
       }
+      continue;
+    }
+
+    // cap-6dy.22: the title search hit the 50-result cap with no exact match, so a
+    // matching object may exist beyond it. Refuse rather than risk an auto-created
+    // duplicate — even if create_missing_relations is off, a "not found" here would
+    // be misleading. Ask for a more specific/unique name.
+    if (r.truncated.length > 0) {
+      problems.push(
+        `could not confirm ${r.truncated.join(", ")} for \`${propId}\`: the title search returned the maximum ${SEARCH_LIMIT} results with no exact match, so a matching object may exist beyond the cap. Use a more specific/unique name to avoid creating a duplicate.`
+      );
       continue;
     }
 
@@ -348,7 +389,10 @@ export async function finalizeRelationPlans(
   wrappers: Record<string, unknown>,
   relationPlans: RelationPlan[],
   setSummary: string[],
-  createdEntities: string[]
+  createdEntities: string[],
+  // Operation-level bounded-wait budget, forwarded to the auto-create calls so a
+  // many-target composite write is paced across a window reset (cap-6dy.19).
+  pace?: WaitBudget
 ): Promise<void> {
   const createEntity = async (name: string, structureId: string): Promise<string> => {
     const target = structures.find(s => s.id === structureId);
@@ -357,7 +401,7 @@ export async function finalizeRelationPlans(
     const obj = await client.createObject({
       structureId,
       properties: { [titleId]: { type: "title", title: { value: name } } }
-    });
+    }, pace);
     createdEntities.push(name);
     return obj.id;
   };
@@ -444,11 +488,17 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
+        // Operation-level bounded-wait budget (~one window). Shared across the
+        // resolution searches, the auto-create loop, and the final write so a
+        // many-relation write can absorb one window reset (cap-6dy.19).
+        const budget: WaitBudget = { remainingMs: WINDOW_MS };
+
         // 2. Build all wrappers (write-free; relation auto-create is planned only).
         const { wrappers, problems, setSummary, relationPlans } = await buildWrappers(
           client,
           structure,
-          { title, properties, labels, relations, createMissingRelations: create_missing_relations }
+          { title, properties, labels, relations, createMissingRelations: create_missing_relations },
+          budget
         );
 
         // 3. Fail-before-create if any problems accumulated.
@@ -471,7 +521,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             wrappers,
             relationPlans,
             setSummary,
-            createdEntities
+            createdEntities,
+            budget
           );
         } catch (error) {
           const msg =
@@ -495,12 +546,12 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 5. Create the object.
+        // 5. Create the object (paced with the same operation budget).
         const created = await client.createObject({
           structureId: structure_id,
           properties: wrappers,
           ...(collections ? { collections } : {})
-        });
+        }, budget);
 
         // 6. Optionally append the markdown body (object already exists).
         let bodyStatus = "";
@@ -522,6 +573,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           createdEntities.length > 0
             ? `\nCreated relation targets: ${createdEntities.join(", ")}`
             : "";
+        const warning = largeBatchWarning(relations, relationPlans);
+        const warnLine = warning ? `\n${warning}` : "";
 
         return {
           content: [
@@ -531,7 +584,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
                 `Created ${structure.title} "${title}"\nID: ${created.id}` +
                 summaryLine +
                 createdLine +
-                bodyStatus
+                bodyStatus +
+                warnLine
             }
           ]
         };
@@ -623,12 +677,14 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 1. Read the current STRUCTURED object (typed-wrapper properties) — this
-        //    yields structureId and the prior values needed for the replace-audit.
-        const current = await client.getObject(objectId);
-
-        // 2. Resolve the object's structure from space info.
-        const { structures } = await client.getSpaceInfo();
+        // 1. Read the current STRUCTURED object (typed-wrapper properties, for
+        //    structureId + prior replace-audit values) and the space structures.
+        //    getSpaceInfo takes no input from getObject, so run them concurrently
+        //    (distinct rate windows — object vs space) (cap-6dy.24 #2).
+        const [current, { structures }] = await Promise.all([
+          client.getObject(objectId),
+          client.getSpaceInfo()
+        ]);
         const structure = structures.find(s => s.id === current.structureId);
         if (!structure) {
           const available = structures.map(s => `${s.id} (${s.title})`).join(", ");
@@ -643,20 +699,36 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
+        // Operation-level bounded-wait budget (~one window), shared across
+        // resolution searches, auto-creates, and the final PATCH (cap-6dy.19).
+        const budget: WaitBudget = { remainingMs: WINDOW_MS };
+
         // 3. Build wrappers (write-free; relation auto-create is planned only).
         const { wrappers, problems, setSummary, relationPlans } = await buildWrappers(
           client,
           structure,
-          { title, properties, labels, relations, createMissingRelations: create_missing_relations }
+          { title, properties, labels, relations, createMissingRelations: create_missing_relations },
+          budget
         );
 
-        // 4. Replace-audit: for every multi-value (label/entity) prop we are about
+        // 4. Fail-before-write if any problems accumulated — write NOTHING.
+        if (problems.length > 0) {
+          return {
+            content: [
+              { type: "text", text: "Cannot update object:\n- " + problems.join("\n- ") }
+            ],
+            isError: true
+          };
+        }
+
+        // 5. Replace-audit: for every multi-value (label/entity) prop we are about
         //    to write, capture the PRIOR value from the structured object so the
         //    success message can show `replaced <name>: <prior> → <new>`. This
         //    operationalizes the replace warning. Best-effort: structured entity
         //    values carry ids (not titles), so relations report a prior count.
         //    Keys accept a property NAME or id (D2) — resolve to the real id
         //    before indexing into `current.properties`, which the API keys by id.
+        //    Built AFTER the fail gate so the early-return path skips it (cap-6dy.24 #5).
         const propIndex = buildPropertyIndex(structure);
 
         const replaceAudit: string[] = [];
@@ -688,16 +760,6 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           }
         }
 
-        // 5. Fail-before-write if any problems accumulated — write NOTHING.
-        if (problems.length > 0) {
-          return {
-            content: [
-              { type: "text", text: "Cannot update object:\n- " + problems.join("\n- ") }
-            ],
-            isError: true
-          };
-        }
-
         // 6. All validation passed — materialize missing relation targets.
         const createdEntities: string[] = [];
         try {
@@ -707,7 +769,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             wrappers,
             relationPlans,
             setSummary,
-            createdEntities
+            createdEntities,
+            budget
           );
         } catch (error) {
           const msg =
@@ -731,12 +794,13 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 7. PATCH the object (merges by key; replaces each named prop's value).
+        // 7. PATCH the object (merges by key; replaces each named prop's value;
+        //    paced with the same operation budget).
         const updated = await client.updateObject({
           id: objectId,
           properties: wrappers,
           ...(collections ? { collections } : {})
-        });
+        }, budget);
 
         // 8. Optionally append the markdown body (update already succeeded).
         let bodyStatus = "";
@@ -760,6 +824,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           createdEntities.length > 0
             ? `\nCreated relation targets: ${createdEntities.join(", ")}`
             : "";
+        const warning = largeBatchWarning(relations, relationPlans);
+        const warnLine = warning ? `\n${warning}` : "";
 
         return {
           content: [
@@ -770,7 +836,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
                 summaryLine +
                 auditLine +
                 createdLine +
-                bodyStatus
+                bodyStatus +
+                warnLine
             }
           ]
         };
