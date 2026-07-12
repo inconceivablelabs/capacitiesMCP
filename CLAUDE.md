@@ -77,13 +77,20 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 Objects have two content layers, handled differently — this is the central mental model:
 - **Properties** — typed fields: scalars, dates, **labels** (e.g. Status/Category), and **entity
   relations** (tags, meeting attendees). Set via `properties`/`labels`/`relations` maps on
-  `create_object`/`update_object`, keyed by property-definition id (from `get_space_info`).
-  Relations and labels are set by **name**, resolved **strictly** (unknown name = error; pass
+  `create_object`/`update_object`. Map keys accept a **property name OR a property-definition
+  id** (from `get_space_info`) — resolved by a shared helper (id exact-match first, then
+  case-insensitive name; ambiguous/unknown = fail-before-write); output is keyed by the resolved
+  id. Relations and labels are set by **name**, resolved **strictly** (unknown name = error; pass
   `create_missing_relations: true` to auto-create). Verified typed-wrapper shapes live in the
   migration design doc's "Verified write reference."
 - **Body** — markdown, via `body`/`notes`/`content`/`markdown` params. Supports Capacities'
   inline conventions: `() text` creates+links a **Task**; `#tag` creates/links a **Tag**;
   `[[Name]]` links an **existing** object only (plain text if it doesn't exist).
+- **Two write endpoints, two verbs:** `update_object` = properties (`PATCH /object`, **replace**
+  each named prop; GET-first, fails on media). `append_to_object` = body (`POST /blocks/append`,
+  **additive**, zero-read). `update_object`'s `body` param is a convenience that also appends
+  after the PATCH. The object-target param on get/append/delete/update is **`objectId`**. See
+  `project-internals/capacitiesMCP/plans/2026-07-11-append-vs-update-differentiation-design.md`.
 
 ### Available MCP Tools
 `search_content`, `list_spaces`, `get_space_info`, `create_object`, `update_object`,
