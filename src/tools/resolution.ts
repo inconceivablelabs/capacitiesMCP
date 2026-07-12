@@ -8,7 +8,7 @@
 // This module is WRITE-FREE: its only outward calls are `client.searchContent`
 // (a read) and the injected `createEntity` callback, whose concrete write
 // implementation lives elsewhere (cap-6dy.11).
-import { CapacitiesClient } from "../client/capacities.js";
+import { CapacitiesClient, WaitBudget } from "../client/capacities.js";
 
 export interface EntityCandidate {
   id: string;
@@ -32,6 +32,9 @@ export interface ResolveEntitiesOptions {
   // write-free and just delegates. Given a name + the single target entity
   // structure, it returns the new object's id.
   createEntity?: (name: string, structureId: string) => Promise<string>;
+  // Operation-level bounded-wait budget, forwarded to the paced search calls so a
+  // many-relation composite write can absorb one window reset (cap-6dy.19).
+  pace?: WaitBudget;
 }
 
 // #PATH_DECISION: exact-title match uses case-insensitive, trimmed equality.
@@ -77,7 +80,7 @@ export async function resolveEntities(
       query: name,
       structureIds,
       limit: 50,
-    });
+    }, opts?.pace);
 
     const exact = results.filter((r) => normalizeName(r.title) === target);
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CapacitiesClient } from "../src/client/capacities.js";
+import { CapacitiesClient, CapacitiesAPIError } from "../src/client/capacities.js";
 import { setupObjectTools } from "../src/tools/object.js";
 
 // --- Mock fetch plumbing (mirrors test/capacities.test.ts) ----------------
@@ -1449,4 +1449,131 @@ test("ambiguous property name -> isError, nothing written", async () => {
     calls.some(c => c.url.endsWith("/object") && c.opts.method === "POST"),
     false
   );
+});
+
+// --- cap-6dy.19: bounded one-window wait + pre-flight warn ----------------
+
+// Fake clock: `now` reads a mutable counter, `sleep` advances it. No real time
+// passes, so a "60s" window wait resolves instantly under test.
+function fakeClock() {
+  let t = 0;
+  const sleeps: number[] = [];
+  return {
+    now: () => t,
+    sleep: async (ms: number) => { t += ms; sleeps.push(ms); },
+    sleeps
+  };
+}
+
+function getCreateObjectPaced(clock: ReturnType<typeof fakeClock>) {
+  const { server, tools } = makeServerStub();
+  const client = new CapacitiesClient({
+    apiToken: "test-token",
+    baseUrl: "https://api.capacities.io",
+    now: clock.now,
+    sleep: clock.sleep
+  });
+  setupObjectTools(server, client);
+  return { handler: tools["create_object"].handler, client };
+}
+
+test("composite create needing a 2nd object window completes with exactly one bounded sleep and warns", async () => {
+  const clock = fakeClock();
+  const { handler } = getCreateObjectPaced(clock);
+  installFetch(router({ createId: "task-1" }));
+
+  // 30 distinct unmatched relation names → 30 searches (fit one window exactly)
+  // + 30 auto-creates (fill the object window) + 1 final create (needs a slot in
+  // the next window → exactly one bounded sleep). objectDemand = 31 > 30 → warn.
+  const names = Array.from({ length: 30 }, (_, i) => `Person ${i + 1}`);
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "Big Task",
+    relations: { assignee: names },
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, undefined, "the write must succeed");
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
+  assert.match(res.content[0].text, /Note: large write/);
+  assert.match(res.content[0].text, /created 31 targets/);
+});
+
+test("composite create needing more than the one-window budget throws RATE_LIMIT_EXCEEDED", async () => {
+  const clock = fakeClock();
+  const { handler } = getCreateObjectPaced(clock);
+  installFetch(router({ createId: "task-1" }));
+
+  // 31 distinct unmatched names: the 31st search consumes the whole ~60s budget
+  // (one window sleep), leaving nothing for the object-window overflow during the
+  // 31 auto-creates → the bounded-wait path exhausts its budget and throws.
+  const names = Array.from({ length: 31 }, (_, i) => `Person ${i + 1}`);
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "Too Big",
+    relations: { assignee: names },
+    create_missing_relations: true
+  });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /Rate limited on object/);
+  assert.deepEqual(clock.sleeps, [60000], "budget covered exactly one window before exhausting");
+});
+
+test("a lone client.createObject (no budget) throws immediately when the object window is full, no sleep", async () => {
+  const clock = fakeClock();
+  const { client } = getCreateObjectPaced(clock);
+  installFetch(router({ createId: "x" }));
+
+  // Fill the object window via the throw-path limiter.
+  const limiter: any = (client as any).rateLimiter;
+  for (let i = 0; i < 30; i++) await limiter.waitForSlot("object");
+
+  const err = await client.createObject({ structureId: "RootTask" }).then(
+    () => { throw new Error("expected rejection"); },
+    (e: unknown) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0, "a lone client call must never sleep");
+});
+
+test("pre-flight warn: a create with >30 relation values returns success WITH the warning line", async () => {
+  const { handler } = getCreateObject();
+  // 31 duplicate values → searchDemand counts raw values (31 > 30) so the warning
+  // fires, while dedup means a single search and no bounded wait.
+  installFetch(
+    router({ search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] }, createId: "task-1" })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "Many Alices",
+    relations: { assignee: Array.from({ length: 31 }, () => "Alice") },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Note: large write/);
+  assert.match(res.content[0].text, /resolved 31 relations/);
+});
+
+test("pre-flight warn: a normal small create returns success with NO warning line", async () => {
+  const { handler } = getCreateObject();
+  installFetch(
+    router({ search: { Alice: [{ id: "p-alice", title: "Alice", structureId: "person" }] }, createId: "task-1" })
+  );
+
+  const res = await handler({
+    structure_id: "RootTask",
+    title: "Small Task",
+    relations: { assignee: "Alice" },
+    create_missing_relations: false
+  });
+
+  assert.equal(res.isError, undefined);
+  assert.doesNotMatch(res.content[0].text, /Note: large write/);
 });

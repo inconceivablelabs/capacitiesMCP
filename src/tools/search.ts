@@ -102,7 +102,10 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
         const spaceInfo = await client.getSpaceInfo();
 
         const structureList = spaceInfo.structures.map(structure => {
-          const properties = structure.propertyDefinitions
+          // Guard both arrays: they come raw from the API with no runtime
+          // validation, and a structure returned without one would otherwise
+          // crash the whole introspection tool (cap-6dy.21).
+          const properties = (structure.propertyDefinitions ?? [])
             .map(prop => {
               // Base line carries the prop-def id — the tool's properties/labels/
               // relations maps are keyed by it, so the LLM needs it to compose calls.
@@ -125,7 +128,7 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
             })
             .join("\n");
 
-          const collections = structure.collections
+          const collections = (structure.collections ?? [])
             .map(col => `- ${col.title}`)
             .join("\n");
 

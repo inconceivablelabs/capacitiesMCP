@@ -101,3 +101,30 @@ test("get_space_info renders label options, multi-select flag, and entity allowe
   // Read-only still shown.
   assert.match(text, /\[read-only\]/);
 });
+
+// cap-6dy.21: a structure returned without propertyDefinitions and/or collections
+// must not crash the introspection tool (these arrays come raw from the API).
+test("get_space_info renders without throwing when a structure is missing collections/propertyDefinitions", async () => {
+  installFetch({
+    structures: [
+      {
+        id: "RootTask",
+        title: "Task",
+        pluralName: "Tasks",
+        labelColor: "blue"
+        // NOTE: both propertyDefinitions and collections are absent.
+      }
+    ]
+  });
+
+  const { server, tools } = makeServerStub();
+  const client = new CapacitiesClient({
+    apiToken: "test-token",
+    baseUrl: "https://api.capacities.io"
+  });
+  setupSearchTools(server, client);
+
+  const res = await tools["get_space_info"].handler({});
+  assert.equal(res.isError, undefined, "must not surface an error");
+  assert.match(res.content[0].text, /\*\*Task\*\*/);
+});

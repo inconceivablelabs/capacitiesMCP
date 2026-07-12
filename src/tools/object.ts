@@ -13,7 +13,7 @@
 // /blocks/append.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { CapacitiesClient, CapacitiesAPIError } from "../client/capacities.js";
+import { CapacitiesClient, CapacitiesAPIError, WaitBudget, WINDOW_MS } from "../client/capacities.js";
 import { CapacitiesStructure, PropertyDefinition } from "../client/types.js";
 import { resolveEntities } from "./resolution.js";
 import { MARKDOWN_BODY_NOTE } from "./descriptions.js";
@@ -27,6 +27,34 @@ function normalize(name: string): string {
 
 function toArray<T>(v: T | T[]): T[] {
   return Array.isArray(v) ? v : [v];
+}
+
+// Per-category rate-limit ceiling (30 requests / 60s window). Used for the
+// pre-flight demand check.
+const RATE_WINDOW_MAX = 30;
+
+// Pre-flight budget check (cap-6dy.19 D): if a composite write's resolution
+// searches or auto-creates exceed a single rate-limit window, the write still
+// proceeds (paced internally) but the success output carries an informational
+// warning nudging the LLM to split large writes. WARN, never reject.
+// `searchDemand` counts raw relation-name values (approximate — dedup happens
+// later); `objectDemand` counts planned auto-creates + the object itself.
+function largeBatchWarning(
+  relations: Record<string, string | string[]> | undefined,
+  relationPlans: RelationPlan[]
+): string | null {
+  let searchDemand = 0;
+  for (const v of Object.values(relations ?? {})) {
+    searchDemand += Array.isArray(v) ? v.length : 1;
+  }
+  const objectDemand = relationPlans.reduce((n, p) => n + p.toCreate.length, 0) + 1;
+  if (searchDemand > RATE_WINDOW_MAX || objectDemand > RATE_WINDOW_MAX) {
+    return (
+      `Note: large write — resolved ${searchDemand} relations / created ${objectDemand} targets ` +
+      `against a 30-per-60s limit; paced internally. Split into smaller batches for snappier writes.`
+    );
+  }
+  return null;
 }
 
 // --- Property-key resolution: NAME or id (D2) -------------------------------
@@ -110,7 +138,10 @@ export interface WrapperInputs {
 export async function buildWrappers(
   client: CapacitiesClient,
   structure: CapacitiesStructure,
-  inputs: WrapperInputs
+  inputs: WrapperInputs,
+  // Operation-level bounded-wait budget, forwarded to relation resolution so its
+  // per-name searches are paced across a window reset (cap-6dy.19).
+  pace?: WaitBudget
 ): Promise<WrapperBuild> {
   const { title, properties, labels, relations, createMissingRelations } = inputs;
 
@@ -291,7 +322,7 @@ export async function buildWrappers(
 
     const names = toArray(rawNames);
     // No createEntity passed → resolveEntities performs no writes.
-    const r = await resolveEntities(client, names, def.allowedStructures, {});
+    const r = await resolveEntities(client, names, def.allowedStructures, { pace });
 
     if (r.ambiguous.length > 0) {
       for (const a of r.ambiguous) {
@@ -348,7 +379,10 @@ export async function finalizeRelationPlans(
   wrappers: Record<string, unknown>,
   relationPlans: RelationPlan[],
   setSummary: string[],
-  createdEntities: string[]
+  createdEntities: string[],
+  // Operation-level bounded-wait budget, forwarded to the auto-create calls so a
+  // many-target composite write is paced across a window reset (cap-6dy.19).
+  pace?: WaitBudget
 ): Promise<void> {
   const createEntity = async (name: string, structureId: string): Promise<string> => {
     const target = structures.find(s => s.id === structureId);
@@ -357,7 +391,7 @@ export async function finalizeRelationPlans(
     const obj = await client.createObject({
       structureId,
       properties: { [titleId]: { type: "title", title: { value: name } } }
-    });
+    }, pace);
     createdEntities.push(name);
     return obj.id;
   };
@@ -444,11 +478,17 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
+        // Operation-level bounded-wait budget (~one window). Shared across the
+        // resolution searches, the auto-create loop, and the final write so a
+        // many-relation write can absorb one window reset (cap-6dy.19).
+        const budget: WaitBudget = { remainingMs: WINDOW_MS };
+
         // 2. Build all wrappers (write-free; relation auto-create is planned only).
         const { wrappers, problems, setSummary, relationPlans } = await buildWrappers(
           client,
           structure,
-          { title, properties, labels, relations, createMissingRelations: create_missing_relations }
+          { title, properties, labels, relations, createMissingRelations: create_missing_relations },
+          budget
         );
 
         // 3. Fail-before-create if any problems accumulated.
@@ -471,7 +511,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             wrappers,
             relationPlans,
             setSummary,
-            createdEntities
+            createdEntities,
+            budget
           );
         } catch (error) {
           const msg =
@@ -495,12 +536,12 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 5. Create the object.
+        // 5. Create the object (paced with the same operation budget).
         const created = await client.createObject({
           structureId: structure_id,
           properties: wrappers,
           ...(collections ? { collections } : {})
-        });
+        }, budget);
 
         // 6. Optionally append the markdown body (object already exists).
         let bodyStatus = "";
@@ -522,6 +563,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           createdEntities.length > 0
             ? `\nCreated relation targets: ${createdEntities.join(", ")}`
             : "";
+        const warning = largeBatchWarning(relations, relationPlans);
+        const warnLine = warning ? `\n${warning}` : "";
 
         return {
           content: [
@@ -531,7 +574,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
                 `Created ${structure.title} "${title}"\nID: ${created.id}` +
                 summaryLine +
                 createdLine +
-                bodyStatus
+                bodyStatus +
+                warnLine
             }
           ]
         };
@@ -643,11 +687,16 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
+        // Operation-level bounded-wait budget (~one window), shared across
+        // resolution searches, auto-creates, and the final PATCH (cap-6dy.19).
+        const budget: WaitBudget = { remainingMs: WINDOW_MS };
+
         // 3. Build wrappers (write-free; relation auto-create is planned only).
         const { wrappers, problems, setSummary, relationPlans } = await buildWrappers(
           client,
           structure,
-          { title, properties, labels, relations, createMissingRelations: create_missing_relations }
+          { title, properties, labels, relations, createMissingRelations: create_missing_relations },
+          budget
         );
 
         // 4. Replace-audit: for every multi-value (label/entity) prop we are about
@@ -707,7 +756,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
             wrappers,
             relationPlans,
             setSummary,
-            createdEntities
+            createdEntities,
+            budget
           );
         } catch (error) {
           const msg =
@@ -731,12 +781,13 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        // 7. PATCH the object (merges by key; replaces each named prop's value).
+        // 7. PATCH the object (merges by key; replaces each named prop's value;
+        //    paced with the same operation budget).
         const updated = await client.updateObject({
           id: objectId,
           properties: wrappers,
           ...(collections ? { collections } : {})
-        });
+        }, budget);
 
         // 8. Optionally append the markdown body (update already succeeded).
         let bodyStatus = "";
@@ -760,6 +811,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           createdEntities.length > 0
             ? `\nCreated relation targets: ${createdEntities.join(", ")}`
             : "";
+        const warning = largeBatchWarning(relations, relationPlans);
+        const warnLine = warning ? `\n${warning}` : "";
 
         return {
           content: [
@@ -770,7 +823,8 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
                 summaryLine +
                 auditLine +
                 createdLine +
-                bodyStatus
+                bodyStatus +
+                warnLine
             }
           ]
         };

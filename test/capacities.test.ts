@@ -388,6 +388,119 @@ test("client-side rate limiter throws RATE_LIMIT_EXCEEDED (with retryAfterMs) in
   assert.equal(err.details.category, "space");
 });
 
+// --- empty/non-JSON 200 guards (cap-6dy.20) ------------------------------
+
+test("searchContent on an empty-body 200 returns [] rather than throwing", async () => {
+  // makeRequest returns {success:true} on a content-length:0 / non-JSON 200;
+  // the guard must turn that into an empty results array.
+  installFetch(() => makeResponse({ status: 200, contentType: null, contentLength: "0" }));
+  const client = newClient();
+
+  const results = await client.searchContent({ query: "anything" });
+  assert.ok(Array.isArray(results));
+  assert.equal(results.length, 0);
+});
+
+test("createObject on an id-less (empty-body) 200 throws API_ERROR", async () => {
+  installFetch(() => makeResponse({ status: 200, contentType: null, contentLength: "0" }));
+  const client = newClient();
+
+  const err = await client.createObject({ structureId: "st-1" }).then(
+    () => { throw new Error("expected rejection"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "API_ERROR");
+  assert.match(err.message, /no object id/);
+});
+
+test("updateObject on an id-less (empty-body) 200 throws API_ERROR", async () => {
+  installFetch(() => makeResponse({ status: 200, contentType: null, contentLength: "0" }));
+  const client = newClient();
+
+  const err = await client.updateObject({ id: "obj-1" }).then(
+    () => { throw new Error("expected rejection"); },
+    (e) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "API_ERROR");
+  assert.match(err.message, /no object id/);
+});
+
+// --- bounded-wait acquire (cap-6dy.19) -----------------------------------
+
+// A fake clock: `now` reads a mutable counter; `sleep` advances it. No real
+// time passes, so a "60s" window wait resolves instantly in tests.
+function fakeClock() {
+  let t = 0;
+  const sleeps: number[] = [];
+  return {
+    now: () => t,
+    sleep: async (ms: number) => { t += ms; sleeps.push(ms); },
+    sleeps,
+    advance: (ms: number) => { t += ms; }
+  };
+}
+
+test("acquireWithWait sleeps exactly one window when full and budget allows, then takes a slot", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  const limiter = client.rateLimiter;
+
+  // Fill the object window (limit 30).
+  for (let i = 0; i < 30; i++) await limiter.waitForSlot("object");
+
+  const budget = { remainingMs: 60000 };
+  await limiter.acquireWithWait("object", budget);
+
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded sleep of one window");
+  assert.equal(budget.remainingMs, 0, "budget decremented by the slept window");
+});
+
+test("acquireWithWait throws RATE_LIMIT_EXCEEDED when the wait exceeds the remaining budget", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  const limiter = client.rateLimiter;
+
+  for (let i = 0; i < 30; i++) await limiter.waitForSlot("object");
+
+  // A budget smaller than the ~60s reset cannot cover the wait → throw, no sleep.
+  const budget = { remainingMs: 1000 };
+  const err = await limiter.acquireWithWait("object", budget).then(
+    () => { throw new Error("expected rejection"); },
+    (e: unknown) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0, "must not sleep when the budget can't cover the wait");
+});
+
+test("waitForSlot still throws immediately (no sleep) when the window is full", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  const limiter = client.rateLimiter;
+
+  for (let i = 0; i < 30; i++) await limiter.waitForSlot("object");
+
+  const err = await limiter.waitForSlot("object").then(
+    () => { throw new Error("expected rejection"); },
+    (e: unknown) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0, "throw path must never sleep");
+});
+
 // --- DEBUG logging gating (cap-6dy.7) ------------------------------------
 
 test("DEBUG logging is gated behind logLevel", async () => {
