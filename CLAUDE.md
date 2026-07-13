@@ -53,6 +53,10 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 - **`search.ts`**: `search_content` (title match, optional `structureIds`/`limit`),
   `list_spaces` (the one scoped space), `get_space_info` (structures + property ids, types,
   `writable`, label options, relation targets).
+- **`find.ts`**: `find_objects` — live LOCATE primitive: title-seed search →
+  per-candidate `GET /object` (JSON, paced) → client-side filter/sort over typed
+  property values. Returns ids+titles+surfaced values, NO bodies (compose with
+  `get_object`). No persistent state (cap-0yu).
 - **`object.ts`**: `create_object`, `update_object`, `get_object`, `append_to_object`,
   `delete_object`. Also the shared, write-free helpers `buildWrappers` + `finalizeRelationPlans`
   used by both create and update.
@@ -91,8 +95,9 @@ Objects have two content layers, handled differently — this is the central men
   `project-internals/capacitiesMCP/plans/2026-07-11-append-vs-update-differentiation-design.md`.
 
 ### Available MCP Tools
-`search_content`, `list_spaces`, `get_space_info`, `create_object`, `update_object`,
-`get_object`, `append_to_object`, `delete_object`, `save_weblink`, `add_to_daily_note`.
+`search_content`, `find_objects`, `list_spaces`, `get_space_info`, `create_object`,
+`update_object`, `get_object`, `append_to_object`, `delete_object`, `save_weblink`,
+`add_to_daily_note`.
 
 ### Error Handling
 - `CapacitiesAPIError(code, message, details)` — codes `RATE_LIMIT_EXCEEDED`,
@@ -139,7 +144,7 @@ Notes: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`; the pack tool no
 format — Claude Desktop accepts both. The `.mcpbignore` must exclude root `node_modules/` (runtime
 deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads/`,
 `.private-journal/`, `.git/`) — otherwise they leak into the public artifact. Verify after packing:
-`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 10 tools, and the
+`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 11 tools, and the
 archive contains no `.private-journal/`/`.beads/`.
 
 ### Deployment (mcp-gateway)
