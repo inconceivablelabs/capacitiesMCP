@@ -1,6 +1,6 @@
 # Capacities MCP Server
 
-An MCP server for [Capacities](https://capacities.io): search, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
+An MCP server for [Capacities](https://capacities.io): search, property-based object lookup, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
 
 > **⚠️ Upgrade to 2.x.** Version **2.x runs on the Capacities v2 REST API**. Version **1.x used the
 > Capacities Beta API, which Capacities discontinues on September 1, 2026.** On that date, 1.x builds
@@ -69,6 +69,7 @@ The Docker image uses `server/`, which contains only the runtime package and com
 | Tool | Description |
 |------|-------------|
 | `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`) |
+| `find_objects` | Locate objects by a property the API can't search on — date, label/status, tag/relation, or scalar. Seeds a title search, then filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). Dates are absolute ISO (equals or `{after,before}` range) |
 | `list_spaces` | Show the space your API token is scoped to |
 | `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
