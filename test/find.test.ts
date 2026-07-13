@@ -115,13 +115,16 @@ function makeResp(body: unknown) {
   return { ok: true, status: 200, headers, async json() { return body; }, async text() { return ""; } };
 }
 function installSearch(resultsByQuery: Record<string, any[]>) {
+  const calls: string[] = [];
   (globalThis as any).fetch = async (url: string, opts: any) => {
+    calls.push(url);
     if (url.endsWith("/objects/search") && opts?.method === "POST") {
       const q = JSON.parse(opts.body).query;
       return makeResp({ results: resultsByQuery[q] ?? [] });
     }
     throw new Error(`unexpected call in compile test: ${url}`);
   };
+  return calls;
 }
 function findClient() {
   return new CapacitiesClient({ apiToken: "t", baseUrl: "https://api.capacities.io" });
@@ -141,7 +144,7 @@ function meetingStructure(): any {
 }
 
 test("compileFilters: date equals (day) + label by name + no fetch when no entity filter", async () => {
-  installSearch({}); // must NOT be called
+  const calls = installSearch({}); // must NOT be called
   const idx = buildPropertyIndex(meetingStructure());
   const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-07-13", Status: "Done" }, { remainingMs: 60000 });
   assert.deepEqual(problems, []);
@@ -149,6 +152,7 @@ test("compileFilters: date equals (day) + label by name + no fetch when no entit
   assert.deepEqual(kinds, ["Date:date-equals", "Status:label-equals"]);
   const label = compiled.find(c => c.kind === "label-equals") as any;
   assert.equal(label.optionId, "s-done");
+  assert.equal(calls.length, 0, "no fetch when no entity filter");
 });
 
 test("compileFilters: entity/tag filter resolves NAME → id via a title search scoped to RootTag", async () => {
@@ -315,6 +319,27 @@ test("find_objects: date range {before} + sort desc + limit 1 → most-recent pr
   assert.match(res.content[0].text, /Found 1 Meetings/);
   assert.match(res.content[0].text, /ID: m2/);
   assert.doesNotMatch(res.content[0].text, /ID: m1/);
+  assert.doesNotMatch(res.content[0].text, /ID: m3/);
+});
+
+test("find_objects: sort wiring — seed order ascends, sort desc must reorder (not pass through)", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "m3", title: "Weekly Roadmap Review", structureId: "meeting" }, // oldest FIRST in seed
+      { id: "m2", title: "Weekly Roadmap Review", structureId: "meeting" }
+    ] },
+    objects: {
+      m3: meetingObj("m3", { date: dateProp("2026-06-30T15:00:00.000Z") }),
+      m2: meetingObj("m2", { date: dateProp("2026-07-07T15:00:00.000Z") })  // newest — must come out FIRST
+    }
+  }));
+  const res = await handler({
+    structure: "Meeting", title_hint: "Weekly Roadmap Review",
+    filters: { Date: { before: "2026-07-13" } }, sort: { by: "Date", order: "desc" }, limit: 1
+  });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /ID: m2/, "desc sort must surface the newest, not the seed-first");
   assert.doesNotMatch(res.content[0].text, /ID: m3/);
 });
 
