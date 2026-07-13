@@ -67,7 +67,7 @@ export interface PropertyIndex {
   byName: Map<string, PropertyDefinition[]>;
 }
 
-function buildPropertyIndex(structure: CapacitiesStructure): PropertyIndex {
+export function buildPropertyIndex(structure: CapacitiesStructure): PropertyIndex {
   const byId = new Map<string, PropertyDefinition>();
   const byName = new Map<string, PropertyDefinition[]>();
   for (const p of structure.propertyDefinitions) {
@@ -82,7 +82,7 @@ function buildPropertyIndex(structure: CapacitiesStructure): PropertyIndex {
 
 type PropResolution = { def: PropertyDefinition } | { problem: string };
 
-function resolvePropertyKey(index: PropertyIndex, key: string): PropResolution {
+export function resolvePropertyKey(index: PropertyIndex, key: string): PropResolution {
   const byId = index.byId.get(key);
   if (byId) return { def: byId };
   const matches = index.byName.get(normalize(key)) ?? [];
