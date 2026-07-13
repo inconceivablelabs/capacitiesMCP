@@ -211,9 +211,11 @@ export class CapacitiesClient {
   }
 
   // Reads the STRUCTURED object (typed-wrapper properties + blocks). update_object
-  // uses this to see current multi-value lists before a replace (cap-6dy.10).
-  async getObject(id: string): Promise<CapacitiesObject> {
-    return this.makeRequest<CapacitiesObject>(`/object?id=${encodeURIComponent(id)}`);
+  // uses this to see current multi-value lists before a replace (cap-6dy.10);
+  // find_objects (cap-0yu) passes a WaitBudget to pace its per-candidate fetch
+  // loop across one object-window boundary.
+  async getObject(id: string, pace?: WaitBudget): Promise<CapacitiesObject> {
+    return this.makeRequest<CapacitiesObject>(`/object?id=${encodeURIComponent(id)}`, {}, pace);
   }
 
   // Generic update: PATCH /object. Merges by key but REPLACES the value of any

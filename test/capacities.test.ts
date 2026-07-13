@@ -541,3 +541,47 @@ test("DEBUG logging is gated behind logLevel", async () => {
   );
   assert.equal(anyDebug2, true, "DEBUG lines emitted at debug log level");
 });
+
+// --- getObject pacing (find_objects stage-2 fetch loop) ------------------
+
+test("getObject WITH a budget sleeps exactly one window when the object bucket is full, then reads", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  installFetch(() =>
+    makeResponse({ body: { id: "o1", structureId: "RootTask", collections: [], properties: {}, blocks: {} } })
+  );
+
+  // Fill the object window (limit 30) via un-paced reads (throw path takes slots).
+  for (let i = 0; i < 30; i++) await client.getObject("x");
+
+  // 31st read WITH a one-window budget must sleep once, not throw.
+  const budget = { remainingMs: 60000 };
+  const obj = await client.getObject("x", budget);
+
+  assert.equal(obj.id, "o1");
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
+  assert.equal(budget.remainingMs, 0, "budget decremented by the slept window");
+});
+
+test("getObject WITHOUT a budget still throws immediately when the object window is full (no sleep)", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  installFetch(() =>
+    makeResponse({ body: { id: "o1", structureId: "RootTask", collections: [], properties: {}, blocks: {} } })
+  );
+
+  for (let i = 0; i < 30; i++) await client.getObject("x");
+
+  const err = await client.getObject("x").then(
+    () => { throw new Error("expected rejection"); },
+    (e: unknown) => e
+  );
+
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0, "the throw path must never sleep");
+});
