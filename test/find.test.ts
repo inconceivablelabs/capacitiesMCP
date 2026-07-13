@@ -182,3 +182,236 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
   assert.equal(bad.sort, null);
   assert.match(bad.problems[0], /unknown property `ghost`/);
 });
+
+// === find_objects tool (mocked fetch, node --test) =========================
+
+import { setupFindTools } from "../src/tools/find.js";
+
+interface FCall { url: string; opts: any; }
+function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
+  const { ok = true, status = 200, contentType = "application/json", contentLength = null, body = {}, text = "" } = init;
+  const headers = { get(n: string): string | null { const k = n.toLowerCase(); if (k === "content-type") return contentType; if (k === "content-length") return contentLength; return null; } };
+  return { ok, status, headers, async json() { return body; }, async text() { return text; } };
+}
+function findStructures(): any {
+  return { structures: [ meetingStructure(),
+    { id: "RootTag", title: "Tag", pluralName: "Tags", labelColor: "green", collections: [],
+      propertyDefinitions: [{ id: "title", name: "Name", type: "title", writable: true }] } ] };
+}
+function meetingObj(id: string, props: Record<string, any>): any {
+  return { id, structureId: "meeting", collections: [], properties: props, blocks: {} };
+}
+function dateProp(iso: string, res: "day" | "time" = "time") { return { type: "date", date: { start: iso, end: null, dateResolution: res } }; }
+
+// Router: structures, search-by-query, object-by-id, optional per-id failure.
+function findRouter(opts: {
+  structures?: any;
+  search?: Record<string, any[]>;
+  objects?: Record<string, any>;
+  getFail?: Record<string, { status: number; text: string }>;
+}) {
+  return (call: FCall) => {
+    const method = call.opts?.method ?? "GET";
+    if (call.url.endsWith("/space/structures")) return fRouteResp({ body: opts.structures ?? findStructures() });
+    if (call.url.endsWith("/objects/search") && method === "POST") {
+      const q = JSON.parse(call.opts.body).query;
+      return fRouteResp({ body: { results: opts.search?.[q] ?? [] } });
+    }
+    if (call.url.includes("/object?id=") && method === "GET") {
+      const m = call.url.match(/\/object\?id=([^&]+)/);
+      const id = m ? decodeURIComponent(m[1]) : "";
+      if (opts.getFail?.[id]) return fRouteResp({ ok: false, status: opts.getFail[id].status, text: opts.getFail[id].text });
+      return fRouteResp({ body: opts.objects?.[id] ?? meetingObj(id, {}) });
+    }
+    throw new Error(`unexpected call: ${method} ${call.url}`);
+  };
+}
+function installFind(responder: (c: FCall) => any) {
+  const calls: FCall[] = [];
+  (globalThis as any).fetch = async (url: string, opts: any) => { const c = { url, opts }; calls.push(c); return responder(c); };
+  return calls;
+}
+// Fake clock (mirrors test/capacities.test.ts): `now` reads a mutable counter,
+// `sleep` advances it. A "60s" window wait resolves instantly under test — so a
+// test that crosses a rate-window boundary must inject this, or it REAL-sleeps.
+function fakeClock() {
+  let t = 0;
+  const sleeps: number[] = [];
+  return { now: () => t, sleep: async (ms: number) => { t += ms; sleeps.push(ms); }, sleeps };
+}
+function getFind(clock?: { now: () => number; sleep: (ms: number) => Promise<void> }) {
+  const tools: Record<string, any> = {};
+  const server: any = { registerTool(name: string, config: any, handler: any) { tools[name] = { name, config, handler }; } };
+  const client = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io",
+    ...(clock ? { now: clock.now, sleep: clock.sleep } : {})
+  });
+  setupFindTools(server, client);
+  return tools["find_objects"].handler;
+}
+
+test("find_objects: seeds, fetches, date-equals narrows to the matching meeting, surfaces Date + freshness stamp", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "m1", title: "Weekly Roadmap Review", structureId: "meeting" },
+      { id: "m2", title: "Weekly Roadmap Review", structureId: "meeting" }
+    ] },
+    objects: {
+      m1: meetingObj("m1", { date: dateProp("2026-07-14T15:00:00.000Z") }),
+      m2: meetingObj("m2", { date: dateProp("2026-07-07T15:00:00.000Z") })
+    }
+  }));
+
+  const res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review", filters: { Date: "2026-07-14" } });
+
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Found 1 Meetings matching "Weekly Roadmap Review"/);
+  assert.match(res.content[0].text, /live as of \d{4}-\d{2}-\d{2}T/);
+  assert.match(res.content[0].text, /ID: m1/);
+  assert.doesNotMatch(res.content[0].text, /ID: m2/);
+  assert.match(res.content[0].text, /Date: 2026-07-14T15:00:00.000Z/);
+});
+
+test("find_objects: blank title_hint → isError, no network calls", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({}));
+  const res = await handler({ structure: "Meeting", title_hint: "   " });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /title_hint is required/);
+  assert.equal(calls.length, 0);
+});
+
+test("find_objects: unknown structure → isError, no search", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({}));
+  const res = await handler({ structure: "Widgets", title_hint: "x" });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /unknown structure "Widgets"/);
+  assert.equal(calls.some(c => c.url.endsWith("/objects/search")), false);
+});
+
+test("find_objects: date range {before} + sort desc + limit 1 → most-recent previous occurrence", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "m1", title: "Weekly Roadmap Review", structureId: "meeting" },
+      { id: "m2", title: "Weekly Roadmap Review", structureId: "meeting" },
+      { id: "m3", title: "Weekly Roadmap Review", structureId: "meeting" }
+    ] },
+    objects: {
+      m1: meetingObj("m1", { date: dateProp("2026-07-14T15:00:00.000Z") }), // future — excluded by before
+      m2: meetingObj("m2", { date: dateProp("2026-07-07T15:00:00.000Z") }), // most recent past
+      m3: meetingObj("m3", { date: dateProp("2026-06-30T15:00:00.000Z") })
+    }
+  }));
+
+  const res = await handler({
+    structure: "Meeting", title_hint: "Weekly Roadmap Review",
+    filters: { Date: { before: "2026-07-13" } }, sort: { by: "Date", order: "desc" }, limit: 1
+  });
+
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Found 1 Meetings/);
+  assert.match(res.content[0].text, /ID: m2/);
+  assert.doesNotMatch(res.content[0].text, /ID: m1/);
+  assert.doesNotMatch(res.content[0].text, /ID: m3/);
+});
+
+test("find_objects: label-equals filter narrows on option id", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Standup: [{ id: "m1", title: "Standup", structureId: "meeting" }, { id: "m2", title: "Standup", structureId: "meeting" }] },
+    objects: {
+      m1: meetingObj("m1", { status: { type: "label", label: [{ id: "s-done", name: "Done" }] } }),
+      m2: meetingObj("m2", { status: { type: "label", label: [{ id: "s-open", name: "Open" }] } })
+    }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Standup", filters: { Status: "Done" } });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Found 1 Meetings/);
+  assert.match(res.content[0].text, /ID: m1/);
+  assert.match(res.content[0].text, /Status: Done/);
+});
+
+test("find_objects: tag-equals resolves name→id (search scoped to RootTag) then matches the entity id", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: {
+      product: [{ id: "tag-product", title: "product", structureId: "RootTag" }],
+      "Staff Meeting": [{ id: "m1", title: "Staff Meeting", structureId: "meeting" }, { id: "m2", title: "Staff Meeting", structureId: "meeting" }]
+    },
+    objects: {
+      m1: meetingObj("m1", { tags: { type: "entity", entity: [{ id: "tag-product" }] } }),
+      m2: meetingObj("m2", { tags: { type: "entity", entity: [{ id: "tag-other" }] } })
+    }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Staff Meeting", filters: { Tags: "product" } });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /Found 1 Meetings/);
+  assert.match(res.content[0].text, /ID: m1/);
+});
+
+test("find_objects: seed truncation (50 candidates) emits the narrow-the-hint note", async () => {
+  // fetch_cap:50 fetches all 50 candidates → the 31st GET crosses the 30/60s
+  // object-window boundary and acquireWithWait sleeps one window. Inject a fake
+  // clock so that sleep resolves instantly instead of a real ~60s wait.
+  const clock = fakeClock();
+  const handler = getFind(clock);
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ id: `m${i}`, title: "Note", structureId: "meeting" }));
+  const objects: Record<string, any> = {};
+  for (const c of fifty) objects[c.id] = meetingObj(c.id, {});
+  installFind(findRouter({ search: { Note: fifty }, objects }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50 });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep for the 31st fetch");
+  assert.match(res.content[0].text, /returned the maximum 50 candidates/);
+});
+
+test("find_objects: fetch_cap below the candidate count emits the fetch-cap note", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Note: [
+      { id: "m1", title: "Note", structureId: "meeting" },
+      { id: "m2", title: "Note", structureId: "meeting" },
+      { id: "m3", title: "Note", structureId: "meeting" }
+    ] },
+    objects: { m1: meetingObj("m1", {}), m2: meetingObj("m2", {}), m3: meetingObj("m3", {}) }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2 });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /fetched the first 2 of 3 candidates/);
+});
+
+test("find_objects: a 429 mid-fetch → fail-open partial results with checked-N-of-M note", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Note: [
+      { id: "m1", title: "Note", structureId: "meeting" },
+      { id: "m2", title: "Note", structureId: "meeting" },
+      { id: "m3", title: "Note", structureId: "meeting" }
+    ] },
+    objects: { m1: meetingObj("m1", {}) },
+    getFail: { m2: { status: 429, text: "slow down" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note" });
+  assert.equal(res.isError, undefined, "partial results are NOT an error (fail-open)");
+  assert.match(res.content[0].text, /rate budget reached — checked 1 of 3 candidates/);
+  assert.match(res.content[0].text, /ID: m1/);
+});
+
+test("find_objects: a non-rate read error skips the candidate and still returns the rest", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Note: [
+      { id: "m1", title: "Note", structureId: "meeting" },
+      { id: "m2", title: "Note", structureId: "meeting" }
+    ] },
+    objects: { m1: meetingObj("m1", {}) },
+    getFail: { m2: { status: 500, text: "boom" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note" });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /1 candidate\(s\) could not be read and were skipped/);
+  assert.match(res.content[0].text, /ID: m1/);
+});

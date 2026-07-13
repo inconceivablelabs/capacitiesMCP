@@ -330,3 +330,156 @@ export function compileSort(
   if ("problem" in resolved) return { sort: null, problems: [resolved.problem] };
   return { sort: { propId: resolved.def.id, propName: resolved.def.name, order: sort.order }, problems: [] };
 }
+
+// --- Tool registration + orchestration -------------------------------------
+
+/** Human-readable one-liner for a surfaced (filtered/sorted) property value. */
+function surfaceValue(v: any): string {
+  if (!v || typeof v.type !== "string") return "—";
+  switch (v.type) {
+    case "date": { const d = readDate(v); return d?.start ?? "—"; }
+    case "label": { const ns = readLabels(v).map(o => o.name); return ns.length ? ns.join(", ") : "—"; }
+    case "entity": { const ids = readEntityIds(v); return ids.length ? `${ids.length} linked (${ids.join(", ")})` : "—"; }
+    default: { const s = readScalar(v); return s === null || s === undefined ? "—" : String(s); }
+  }
+}
+
+export function setupFindTools(server: McpServer, client: CapacitiesClient) {
+  server.registerTool(
+    "find_objects",
+    {
+      title: "Find Capacities Objects",
+      description:
+        "Locate objects by a property/date/label/tag the API cannot search on. It seeds a title search " +
+        "(the only query the API allows), fetches candidates, then filters and sorts client-side. Returns " +
+        "matching ids + titles + the filtered/sorted property values — NO bodies (read a match's body with " +
+        "get_object). REQUIRED: `title_hint` (a non-empty title seed) and `structure` (NAME or id from " +
+        "get_space_info). `filters` are keyed by property NAME or id: a date value is an ISO string (equals, " +
+        "day-granularity) or {after,before} (ISO range); a label value is an option NAME; a relation/tag " +
+        "value is an object NAME; text/number/boolean are equals. Dates must be absolute ISO strings — " +
+        "relative terms like \"tomorrow\" are NOT supported (compute the date and pass it). `sort` is {by, " +
+        "order}; missing values sort last. It CANNOT enumerate a type without a title seed, follow backlinks, " +
+        "or read bodies.",
+      inputSchema: {
+        structure: z.string().describe("Object type to search — structure NAME or id (from get_space_info)"),
+        title_hint: z.string().describe("Title text to seed the search (REQUIRED, non-empty — the only seed the API allows)"),
+        filters: z.record(filterValueSchema).optional().describe(
+          "Client-side filters keyed by property NAME or id. Date: ISO string (equals) or {after,before} (ISO range). Label: option NAME. Relation/tag: object NAME. Scalars: equals."
+        ),
+        sort: z.object({
+          by: z.string().describe("Property NAME or id to sort by"),
+          order: z.enum(["asc", "desc"]).default("asc")
+        }).optional().describe("Sort by a property; missing values sort last"),
+        limit: z.number().int().positive().optional().describe("Max results to return after filtering"),
+        fetch_cap: z.number().int().min(1).max(50).default(30).describe(
+          "Max candidates to fetch in stage 2 (default 30 fits one rate window; max 50 may add one ~60s wait)"
+        )
+      }
+    },
+    async ({ structure, title_hint, filters, sort, limit, fetch_cap }) => {
+      try {
+        // 0. Validate the seed BEFORE any call — a blank title_hint is never fired
+        //    as an empty search (the API's only seed lever must be meaningful).
+        if (!title_hint || !title_hint.trim()) {
+          return { content: [{ type: "text", text: "title_hint is required and must be non-empty — it is the title seed for stage 1." }], isError: true };
+        }
+
+        // 1. Resolve the structure (space bucket — one call, reused).
+        const { structures } = await client.getSpaceInfo();
+        const sres = resolveStructure(structures, structure);
+        if ("problem" in sres) {
+          return { content: [{ type: "text", text: sres.problem }], isError: true };
+        }
+        const struct = sres.structure;
+        const index = buildPropertyIndex(struct);
+
+        // Operation-level bounded-wait budget: buys exactly ONE object-window
+        // boundary sleep across the whole call (entity-filter searches + seed
+        // search + the fetch loop). Past it, acquireWithWait throws
+        // RATE_LIMIT_EXCEEDED and the fetch loop returns partial results.
+        const budget: WaitBudget = { remainingMs: WINDOW_MS };
+
+        // 2. Compile filters + sort (fail-before-fetch). Entity filters resolve a
+        //    NAME → id here (a search call), so a bad filter fails fast.
+        const { compiled, problems } = await compileFilters(client, index, filters, budget);
+        const { sort: compiledSort, problems: sortProblems } = compileSort(index, sort);
+        const allProblems = [...problems, ...sortProblems];
+        if (allProblems.length > 0) {
+          return { content: [{ type: "text", text: "Cannot run find_objects:\n- " + allProblems.join("\n- ") }], isError: true };
+        }
+
+        // 3. Seed: title search scoped to the one structure (search bucket).
+        const seed = await client.searchContent(
+          { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
+          budget
+        );
+        const seedTruncated = seed.length >= SEARCH_LIMIT;
+        const stamp = new Date().toISOString();
+
+        if (seed.length === 0) {
+          return { content: [{ type: "text", text: `No ${struct.pluralName} found with a title matching "${title_hint}" (live as of ${stamp}).` }] };
+        }
+
+        // 4. Fetch candidates (object bucket, paced) — one GET /object per
+        //    candidate, up to fetch_cap, in search-rank order. Fail-open: a rate
+        //    stop ends the loop with partial results; a non-rate read error skips
+        //    the candidate and continues.
+        // NOTE: zod's .default(30) is applied by the MCP SDK's input parse, NOT on a
+        // direct handler call (tests invoke the handler directly), so default here too.
+        const cap = fetch_cap ?? 30;
+        const planned = Math.min(seed.length, cap);
+        const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
+        let rateStopped = false;
+        let erroredCount = 0;
+        for (let i = 0; i < planned; i++) {
+          const cand = seed[i];
+          try {
+            const obj = await client.getObject(cand.id, budget);
+            fetched.push({ id: cand.id, title: cand.title, props: (obj.properties ?? {}) as Record<string, any> });
+          } catch (e) {
+            if (e instanceof CapacitiesAPIError && e.code === "RATE_LIMIT_EXCEEDED") { rateStopped = true; break; }
+            erroredCount++;
+          }
+        }
+        const consideredCount = fetched.length + erroredCount;
+
+        // 5. Filter client-side over the typed JSON values.
+        let matches = fetched.filter(f => compiled.every(cf => matchesFilter(f.props, cf)));
+
+        // 6. Sort (missing last), then apply the post-filter limit.
+        if (compiledSort) {
+          const cs = compiledSort;
+          matches = matches.slice().sort((a, b) =>
+            compareForSort(sortKey(a.props[cs.propId]), sortKey(b.props[cs.propId]), cs.order)
+          );
+        }
+        if (limit !== undefined) matches = matches.slice(0, limit);
+
+        // 7. Surface only the filtered + sorted property values (P9 — not a full dump).
+        const surfaceProps: { id: string; name: string }[] = [];
+        for (const cf of compiled) if (!surfaceProps.some(s => s.id === cf.propId)) surfaceProps.push({ id: cf.propId, name: cf.propName });
+        if (compiledSort && !surfaceProps.some(s => s.id === compiledSort.propId)) surfaceProps.push({ id: compiledSort.propId, name: compiledSort.propName });
+
+        const blocks = matches.map(m => {
+          const lines = [`**${m.title}**`, `ID: ${m.id}`];
+          for (const s of surfaceProps) lines.push(`${s.name}: ${surfaceValue(m.props[s.id])}`);
+          return lines.join("\n");
+        });
+
+        const header = `Found ${matches.length} ${struct.pluralName} matching "${title_hint}" (live as of ${stamp}):`;
+        const notes: string[] = [];
+        if (seedTruncated) notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
+        if (rateStopped) notes.push(`Note: rate budget reached — checked ${consideredCount} of ${seed.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
+        else if (planned < seed.length) notes.push(`Note: fetched the first ${planned} of ${seed.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
+        else if (erroredCount > 0) notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
+
+        const body = blocks.length ? blocks.join("\n---\n") : "(no candidates matched the filters)";
+        const noteLine = notes.length ? "\n\n" + notes.join("\n") : "";
+        return { content: [{ type: "text", text: `${header}\n\n${body}${noteLine}` }] };
+      } catch (error) {
+        const message = error instanceof CapacitiesAPIError ? error.message : error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `Failed to find objects: ${message}` }], isError: true };
+      }
+    }
+  );
+}
