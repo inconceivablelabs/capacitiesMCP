@@ -187,3 +187,146 @@ export function resolveStructure(
   const available = structures.map(s => `${s.title} (${s.id})`).join(", ");
   return { problem: `unknown structure "${param}". Available: ${available}` };
 }
+
+// --- Filter/sort input schema + compilation --------------------------------
+
+// A filter value is a scalar (equals) or a date range object {after?, before?}.
+export const filterValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.object({ after: z.string().optional(), before: z.string().optional() })
+]);
+export type FilterValue = z.infer<typeof filterValueSchema>;
+
+// Detects a time component in an ISO string (e.g. "2026-07-13T09:00"); a bare
+// "2026-07-13" is treated as day-granularity (matches any time that day).
+function hasTimeComponent(s: string): boolean {
+  return /\d{4}-\d{2}-\d{2}[T ]\d/.test(s);
+}
+
+/**
+ * Resolves each filter key (name-or-id) to a property def, picks the operator
+ * from the def's type, and validates the value. Entity-typed filters resolve
+ * their NAME → object id via resolveEntities (a title search, paced by `pace`).
+ * Accumulates problems; never guesses.
+ */
+export async function compileFilters(
+  client: CapacitiesClient,
+  index: PropertyIndex,
+  filters: Record<string, FilterValue> | undefined,
+  pace: WaitBudget
+): Promise<{ compiled: CompiledFilter[]; problems: string[] }> {
+  const compiled: CompiledFilter[] = [];
+  const problems: string[] = [];
+
+  for (const [key, raw] of Object.entries(filters ?? {})) {
+    const resolved = resolvePropertyKey(index, key);
+    if ("problem" in resolved) { problems.push(resolved.problem); continue; }
+    const def = resolved.def;
+    const isRange = typeof raw === "object" && raw !== null;
+
+    if (def.type === "date") {
+      if (isRange) {
+        const r = raw as { after?: string; before?: string };
+        if (r.after === undefined && r.before === undefined) {
+          problems.push(`filter \`${key}\` range needs at least one of after/before`);
+          continue;
+        }
+        let afterMs: number | null = null;
+        let beforeMs: number | null = null;
+        if (r.after !== undefined) {
+          afterMs = Date.parse(r.after);
+          if (Number.isNaN(afterMs)) { problems.push(`filter \`${key}\` after is not a valid ISO date: ${r.after}`); continue; }
+        }
+        if (r.before !== undefined) {
+          beforeMs = Date.parse(r.before);
+          if (Number.isNaN(beforeMs)) { problems.push(`filter \`${key}\` before is not a valid ISO date: ${r.before}`); continue; }
+        }
+        compiled.push({ propId: def.id, propName: def.name, kind: "date-range", afterMs, beforeMs });
+      } else {
+        const s = String(raw);
+        const instant = Date.parse(s);
+        if (Number.isNaN(instant)) { problems.push(`filter \`${key}\` is not a valid ISO date: ${s}`); continue; }
+        compiled.push({ propId: def.id, propName: def.name, kind: "date-equals", day: dayOf(s), hasTime: hasTimeComponent(s), instant });
+      }
+      continue;
+    }
+
+    if (isRange) {
+      problems.push(`filter \`${key}\`: after/before ranges are only valid for date properties`);
+      continue;
+    }
+
+    if (def.type === "label") {
+      const options = def.labelSet ?? [];
+      const opt = options.find(o => normalize(o.name) === normalize(String(raw)));
+      if (!opt) {
+        const valid = options.map(o => o.name).join(", ");
+        problems.push(`filter \`${key}\`: unknown option \`${String(raw)}\`; valid: ${valid}`);
+        continue;
+      }
+      compiled.push({ propId: def.id, propName: def.name, kind: "label-equals", optionId: opt.id, optionName: opt.name });
+      continue;
+    }
+
+    if (def.type === "entity") {
+      const name = String(raw);
+      // Entity/tag values in GET /object JSON are id-only (A5), so a name filter
+      // must resolve NAME → id via a title search scoped to the relation's targets.
+      const r = await resolveEntities(client, [name], def.allowedStructures, { pace });
+      if (r.ambiguous.length > 0) {
+        const cands = r.ambiguous[0].candidates.map(c => `${c.title} (${c.id})`).join(", ");
+        problems.push(`filter \`${key}\`: \`${name}\` is ambiguous: ${cands}`);
+        continue;
+      }
+      if (r.truncated.length > 0) {
+        problems.push(`filter \`${key}\`: could not confirm \`${name}\` — the title search returned the maximum ${SEARCH_LIMIT} results with no exact match; use a more specific name`);
+        continue;
+      }
+      if (r.linked.length !== 1) {
+        problems.push(`filter \`${key}\`: no object named \`${name}\` to filter on`);
+        continue;
+      }
+      compiled.push({ propId: def.id, propName: def.name, kind: "entity-equals", targetId: r.linked[0].id, targetName: name });
+      continue;
+    }
+
+    // scalar (text / url / number / boolean / title)
+    if (def.type === "number") {
+      const n = Number(raw);
+      if (Number.isNaN(n)) { problems.push(`filter \`${key}\` value is not a number: ${String(raw)}`); continue; }
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: n });
+      continue;
+    }
+    if (def.type === "boolean") {
+      let b: boolean;
+      if (typeof raw === "boolean") b = raw;
+      else if (String(raw).toLowerCase() === "true") b = true;
+      else if (String(raw).toLowerCase() === "false") b = false;
+      else { problems.push(`filter \`${key}\` value is not a boolean: ${String(raw)}`); continue; }
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: b });
+      continue;
+    }
+    if (def.type === "text" || def.type === "url" || def.type === "title") {
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: String(raw) });
+      continue;
+    }
+
+    problems.push(`filter \`${key}\`: cannot filter on property type \`${def.type}\``);
+  }
+
+  return { compiled, problems };
+}
+
+export interface CompiledSort { propId: string; propName: string; order: "asc" | "desc"; }
+
+export function compileSort(
+  index: PropertyIndex,
+  sort: { by: string; order: "asc" | "desc" } | undefined
+): { sort: CompiledSort | null; problems: string[] } {
+  if (!sort) return { sort: null, problems: [] };
+  const resolved = resolvePropertyKey(index, sort.by);
+  if ("problem" in resolved) return { sort: null, problems: [resolved.problem] };
+  return { sort: { propId: resolved.def.id, propName: resolved.def.name, order: sort.order }, problems: [] };
+}

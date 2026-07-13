@@ -103,3 +103,82 @@ test("resolveStructure: id (incl. built-ins) wins; name/pluralName resolves; unk
   assert.deepEqual((resolveStructure(structs, "meeting") as any).structure.id, "meeting");    // id
   assert.match((resolveStructure(structs, "Nope") as any).problem, /unknown structure/);
 });
+
+// --- compile: needs a client + mocked fetch for entity resolution ----------
+
+import { CapacitiesClient } from "../src/client/capacities.js";
+import { buildPropertyIndex } from "../src/tools/object.js";
+import { compileFilters, compileSort } from "../src/tools/find.js";
+
+function makeResp(body: unknown) {
+  const headers = { get: (n: string) => (n.toLowerCase() === "content-type" ? "application/json" : null) };
+  return { ok: true, status: 200, headers, async json() { return body; }, async text() { return ""; } };
+}
+function installSearch(resultsByQuery: Record<string, any[]>) {
+  (globalThis as any).fetch = async (url: string, opts: any) => {
+    if (url.endsWith("/objects/search") && opts?.method === "POST") {
+      const q = JSON.parse(opts.body).query;
+      return makeResp({ results: resultsByQuery[q] ?? [] });
+    }
+    throw new Error(`unexpected call in compile test: ${url}`);
+  };
+}
+function findClient() {
+  return new CapacitiesClient({ apiToken: "t", baseUrl: "https://api.capacities.io" });
+}
+function meetingStructure(): any {
+  return {
+    id: "meeting", title: "Meeting", pluralName: "Meetings", labelColor: "blue", collections: [],
+    propertyDefinitions: [
+      { id: "title", name: "Title", type: "title", writable: true },
+      { id: "date", name: "Date", type: "date", writable: true },
+      { id: "status", name: "Status", type: "label", writable: true, multiple: false,
+        labelSet: [{ id: "s-open", name: "Open" }, { id: "s-done", name: "Done" }] },
+      { id: "tags", name: "Tags", type: "entity", writable: true, allowedStructures: ["RootTag"] },
+      { id: "note", name: "Note", type: "text", writable: true }
+    ]
+  };
+}
+
+test("compileFilters: date equals (day) + label by name + no fetch when no entity filter", async () => {
+  installSearch({}); // must NOT be called
+  const idx = buildPropertyIndex(meetingStructure());
+  const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-07-13", Status: "Done" }, { remainingMs: 60000 });
+  assert.deepEqual(problems, []);
+  const kinds = compiled.map(c => `${c.propName}:${c.kind}`).sort();
+  assert.deepEqual(kinds, ["Date:date-equals", "Status:label-equals"]);
+  const label = compiled.find(c => c.kind === "label-equals") as any;
+  assert.equal(label.optionId, "s-done");
+});
+
+test("compileFilters: entity/tag filter resolves NAME → id via a title search scoped to RootTag", async () => {
+  installSearch({ product: [{ id: "tag-product", title: "product", structureId: "RootTag" }] });
+  const idx = buildPropertyIndex(meetingStructure());
+  const { compiled, problems } = await compileFilters(findClient(), idx, { Tags: "product" }, { remainingMs: 60000 });
+  assert.deepEqual(problems, []);
+  const ef = compiled.find(c => c.kind === "entity-equals") as any;
+  assert.equal(ef.targetId, "tag-product");
+});
+
+test("compileFilters: range on a label prop, unknown option, unknown property, bad ISO all become problems (nothing compiled)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  const { compiled, problems } = await compileFilters(findClient(), idx,
+    { Status: { after: "2026-01-01" }, note: "ok", Date: "not-a-date", Nope: "x" } as any,
+    { remainingMs: 60000 });
+  assert.match(problems.join("\n"), /only valid for date properties/);
+  assert.match(problems.join("\n"), /not a valid ISO date/);
+  assert.match(problems.join("\n"), /unknown property `Nope`/);
+  // Only the valid scalar `note` compiled.
+  assert.deepEqual(compiled.map(c => c.propName), ["Note"]);
+});
+
+test("compileSort: resolves by name, defaults propagate; unknown property → problem", () => {
+  const idx = buildPropertyIndex(meetingStructure());
+  const ok = compileSort(idx, { by: "Date", order: "desc" });
+  assert.deepEqual(ok.problems, []);
+  assert.deepEqual(ok.sort, { propId: "date", propName: "Date", order: "desc" });
+  const bad = compileSort(idx, { by: "ghost", order: "asc" });
+  assert.equal(bad.sort, null);
+  assert.match(bad.problems[0], /unknown property `ghost`/);
+});
