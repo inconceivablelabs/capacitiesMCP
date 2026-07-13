@@ -139,7 +139,11 @@ npm run build                          # Compile src/ → server/dist/
 npx @anthropic-ai/mcpb pack            # Package (reads manifest.json + .mcpbignore) → capacitiesMCP.mcpb
 mv capacitiesMCP.mcpb capacities-desktop-extension.dxt   # ship under the .dxt name (README links it)
 ```
-Notes: `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`; the pack tool now reads
+Notes: **`manifest.json`'s `tools:` array is hand-maintained metadata** — adding/removing a tool
+in code does NOT update it, and the packed .dxt ships the stale list silently (bit us on
+find_objects: repack showed 10 tools until the entry was added by hand; same class as the
+gateway catalog's metadata-only `tools:` field). Adding a tool = code + CLAUDE.md + README
+table + manifest.json `tools:` + version bump. `@anthropic-ai/dxt` was renamed to `@anthropic-ai/mcpb`; the pack tool now reads
 **`.mcpbignore`** (NOT `.dxtignore`) and outputs **`.mcpb`**. `.mcpb`/`.dxt` are the same zip
 format — Claude Desktop accepts both. The `.mcpbignore` must exclude root `node_modules/` (runtime
 deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads/`,
