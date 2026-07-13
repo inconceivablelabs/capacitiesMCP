@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "capacities-mcp-server",
   "display_name": "Capacities MCP Server",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Capacities v2 knowledge management integration: search, object CRUD, weblink capture, and daily notes. Runs on the Capacities v2 REST API.",
   "author": {
     "name": "Tom Booth",
@@ -15,7 +15,9 @@
     "entry_point": "server/dist/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/dist/index.js"],
+      "args": [
+        "${__dirname}/server/dist/index.js"
+      ],
       "env": {
         "CAPACITIES_API_TOKEN": "${user_config.capacities_api_token}",
         "CAPACITIES_API_BASE_URL": "${user_config.capacities_api_base_url}",
@@ -49,6 +51,10 @@
     {
       "name": "search_content",
       "description": "Search objects by title across your Capacities space (optional structure filter and limit)"
+    },
+    {
+      "name": "find_objects",
+      "description": "Locate objects by a property/date/label/tag the API cannot search on — title-seed search, then client-side filter/sort over typed property values (returns ids+titles+values, no bodies)"
     },
     {
       "name": "list_spaces",
@@ -89,6 +95,10 @@
   ],
   "compatibility": {
     "claude_desktop": ">=0.12.0",
-    "platforms": ["darwin", "win32", "linux"]
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   }
 }
