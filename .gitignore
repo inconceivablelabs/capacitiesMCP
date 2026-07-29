@@ -17,3 +17,6 @@ Thumbs.db
 # Private design/plan docs (not for distribution) — canonical copies live in
 # project-internals/capacitiesMCP/plans/. Public repo ships only docs/ user guides.
 /docs/plans/
+
+# serena MCP local index/cache
+.serena/
