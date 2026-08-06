@@ -123,6 +123,20 @@ Objects have two content layers, handled differently — this is the central men
   timestamp is reliable; `dateResolution:"day"` requires UTC-midnight aligned to the space's TZ.
 - **`update_object` REPLACES** a named property's value (it does not append); it GETs the object
   first (media objects will fail there). Use `append_to_object` for body.
+- **The client-side limiter is NOT the real constraint — `api.capacities.io` enforces its own
+  budget server-side, and that window is ROLLING, not fixed.** Measured against `/object`
+  2026-08-06: a caller that spends ~28 calls reading and then writes immediately gets rejected,
+  and slots free **individually** as each ages out of the trailing 60s. Diagnostic tell for
+  rolling-vs-fixed: the FIRST n operations fail and later ones succeed (budget exhaustion would
+  fail the LAST n). Two consequences. (a) The in-process limiter cannot protect a consumer that
+  builds a fresh client per call — personal-assistant does exactly that, so the limiter never
+  engages for it (pa-ikuq); treat it as best-effort, not a guarantee. (b) **Server rejections
+  arrive as a Cloudflare 1015 "Access denied … banned you temporarily" HTML page, not a clean
+  429 with a JSON body** — error classification keyed on status 429 or on parseable JSON will
+  miss them, and the ban is IP-level, so one greedy consumer takes every other client sharing
+  that egress down with it for hours. Advise consumers to retry on rate-limit rather than model
+  the window; two client-side pacing models (fixed then sliding) both failed in production while
+  retry needed no model at all. (pa-z4m5, 2026-08-06.)
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
 ### Design docs
