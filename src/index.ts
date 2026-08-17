@@ -11,6 +11,7 @@ import { setupObjectTools } from "./tools/object.js";
 import { setupFindTools } from "./tools/find.js";
 import { setupSpaceResources } from "./resources/spaces.js";
 import { validateEnvironment } from "./utils/validation.js";
+import { SERVER_VERSION } from "./version.js";
 
 async function main() {
   // Validate environment
@@ -26,7 +27,7 @@ async function main() {
   // Create MCP server
   const server = new McpServer({
     name: "capacities-mcp-server",
-    version: "2.0.0"
+    version: SERVER_VERSION
   });
 
   // Setup tools
