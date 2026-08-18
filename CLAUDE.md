@@ -187,10 +187,23 @@ The token + tool list live in the mcp-gateway repo's `docker/config.yaml` and
 needs a manual host `docker pull … :latest` + gateway restart. After redeploying, existing MCP
 clients must reconnect (`/mcp`) to see the new tool surface.
 
+**Verifying a built image (stdio smoke).** Hold stdin open past the last request or the server hits
+EOF and exits before flushing — piping the file straight in is silent ~2/3 of runs, and a silent *control*
+reads as "the deployed image is broken" rather than "the probe raced":
+```bash
+(cat req.jsonl; sleep 3) | docker run --rm -i -e CAPACITIES_API_TOKEN=<any> <image>
+```
+Run it 2-3x against the PREVIOUS image as a control and compare tool count + `serverInfo.version`. (cap-d8f, cap-0yr)
+
 ### Project Structure
 - `src/` — Single source of truth (TypeScript)
 - `server/` — Runtime packaging only (Dockerfile, package.json, dist/)
 - `tsconfig.json` — Builds `src/` directly into `server/dist/`; `tsconfig.test.json` builds tests.
+- **Two lockfiles, both load-bearing.** The Dockerfile's builder stage installs from the ROOT
+  `package.json`/`package-lock.json` (needs the devDeps to run `tsc`); the runtime stage installs from
+  `server/` with `--omit=dev`. They are a **duplicated tree, not two packages** — after a dependency fix
+  they resolve identically except root's build-only entries (`typescript`, `@types/node`, `undici-types`).
+  Any `npm audit fix` must be run in BOTH, or the image ships the unfixed half. (cap-d8f)
 
 ### MCP Server Integration
 
