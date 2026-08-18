@@ -170,10 +170,16 @@ The gateway spawns the child image `ghcr.io/inconceivablelabs/capacitiesmcp:late
 hyphen**) with **`--pull never`** — so it uses whatever image is **local** on the host Docker
 daemon and does **not** pull from GHCR. To deploy new code:
 ```bash
+docker tag ghcr.io/inconceivablelabs/capacitiesmcp:latest capacitiesmcp:rollback-pre-<sha>  # FIRST
 npm run build
 docker build -f server/Dockerfile -t ghcr.io/inconceivablelabs/capacitiesmcp:latest .
 cd ../mcp-gateway && docker compose restart mcp-gateway   # re-reads catalog/config, respawns child
 ```
+**Tag the rollback BEFORE rebuilding.** Rebuilding onto `:latest` can leave the prior image
+unrecoverable — it is not reliably retained as a dangling `<none>` (verified cap-d8f 2026-08-17:
+`docker image inspect <old-id>` → `No such image`). If the tag is already gone, rebuild the
+previous commit in a throwaway worktree, and smoke it to confirm it reproduces the OLD behaviour
+before trusting it as a rollback.
 The token + tool list live in the mcp-gateway repo's `docker/config.yaml` and
 `docker/catalogs/custom-local-catalog.yaml` (real files gitignored; `.example` tracked) — **not**
 `server.yaml`. GHCR `:latest` is only refreshed when the branch merges to **main** (CI gates
