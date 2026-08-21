@@ -144,6 +144,14 @@ Objects have two content layers, handled differently — this is the central men
   other client sharing that egress down with it for hours. Advise consumers to retry on rate-limit rather than model
   the window; two client-side pacing models (fixed then sliding) both failed in production while
   retry needed no model at all. (pa-z4m5, 2026-08-06.)
+- **This repo is PUBLIC — never vendor real space data as a test fixture.** `gh repo view` →
+  `"visibility":"PUBLIC"`. Meeting/person/org titles from Tom's Capacities space carry colleague names, client
+  and partner organisations, and board-meeting cadence; committing them is permanent (history, forks, clones).
+  Build fixtures **synthetically** to reproduce the *shapes* under test (separators, double spaces, mid-word
+  matches, date-digit runs, empty titles) and keep any real corpus in the private `project-internals` repo,
+  citing its result rather than shipping it. Caught 2026-08-21 (cap-i93): a design doc instructed "a fixture of
+  the 469 real titles" and survived four review passes — every reviewer was scoped to *is the design correct*,
+  nobody to *what does this publish*. Ask that second question separately.
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
 ### Design docs
