@@ -131,10 +131,17 @@ Objects have two content layers, handled differently — this is the central men
   fail the LAST n). Two consequences. (a) The in-process limiter cannot protect a consumer that
   builds a fresh client per call — personal-assistant does exactly that, so the limiter never
   engages for it (pa-ikuq); treat it as best-effort, not a guarantee. (b) **Server rejections
-  arrive as a Cloudflare 1015 "Access denied … banned you temporarily" HTML page, not a clean
-  429 with a JSON body** — error classification keyed on status 429 or on parseable JSON will
-  miss them, and the ban is IP-level, so one greedy consumer takes every other client sharing
-  that egress down with it for hours. Advise consumers to retry on rate-limit rather than model
+  arrive as a Cloudflare 1015 "Access denied … banned you temporarily" HTML BODY carried on an
+  HTTP 429** (`api.capacities.io` is behind Cloudflare — `server: cloudflare`, `cf-ray`). So
+  classification keyed on **status 429 works**; classification keyed on a **parseable JSON body
+  does not**. Verified 2026-08-20 by tracing the one captured rejection
+  (`backfill_meeting_titles.py:277`, live 2026-08-05) back through `object.ts:852` →
+  `capacities.ts:79`, which fires only inside the `status === 429` branch. An earlier version of
+  this line said a 429-keyed check "will miss them"; that was wrong and it caused a P1 bug to be
+  filed against a non-existent amplifier (cap-fvb, retracted). One incident, two requests — it
+  does not prove every Cloudflare rejection is a 429 (a hard ban can be 403), which is why
+  retry-on-rejection beats classifying. The ban is IP-level, so one greedy consumer takes every
+  other client sharing that egress down with it for hours. Advise consumers to retry on rate-limit rather than model
   the window; two client-side pacing models (fixed then sliding) both failed in production while
   retry needed no model at all. (pa-z4m5, 2026-08-06.)
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
