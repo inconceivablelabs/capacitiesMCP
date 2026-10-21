@@ -165,6 +165,26 @@ npm test             # Run tests
 
 See [CLAUDE.md](./CLAUDE.md) for architecture details.
 
+## Security advisories and reachability
+
+This server speaks MCP over **stdio only**. It imports two modules from
+`@modelcontextprotocol/sdk` (`server/mcp.js` and `server/stdio.js`); the SDK's HTTP transports,
+OAuth client/server code and Express/Hono middleware are installed as dependencies but never
+loaded. Most advisories that Dependabot raises against this repo therefore cannot be reached at
+runtime. We still patch them, because the lockfiles ship in the Docker image and the extension.
+
+As of 2.1.2 (SDK 1.32.1), `npm audit` reports 0 in both lockfiles. Reachability of the
+advisories cleared in that release, checked against a module-resolution trace of a live stdio
+session (initialize, `tools/list`, `tools/call`, `resources/list`):
+
+| Package | Loaded on our path? | Reachable? |
+|---|---|---|
+| `@modelcontextprotocol/sdk` (5 advisories) | Yes | No. Each advisory is scoped to HTTP servers, the HTTP/OAuth client, bearer auth or `taskStore`, none of which we use. The SDK's own advisory text says stdio-only servers are not affected by the memory-exhaustion one. |
+| `fast-uri` | Yes, via `ajv` | No. The SDK builds an `ajv` instance at startup, but only calls it to validate form-elicitation replies (`elicitInput`), which this server never sends. Instrumented, a session that included tool calls with malformed URIs in their arguments made zero `fast-uri` calls; a control that compiled a schema with an `$id` through the same `ajv` instance made 15. |
+| `proxy-addr`, `qs` (via Express) | No | No. |
+| `hono` | No | No. |
+| `ip-address` (via `express-rate-limit`) | No | No. |
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
