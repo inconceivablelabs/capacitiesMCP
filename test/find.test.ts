@@ -480,6 +480,11 @@ test("find_objects: semantic extras in the seed are never fetched, never returne
   assert.doesNotMatch(text, /ID: x2/);
   assert.match(text, /2 search result\(s\) were ignored because their titles don't contain "Weekly Roadmap Review"/);
   assert.match(text, /matches by meaning/);
+  // Contract with consumers: EVERY "Note:" line means the sweep is incomplete
+  // (personal-assistant scripts/backfill_meeting_titles.py _NOTE_RE fails the
+  // run on any). Dropping semantic extras is not incompleteness, and this
+  // response is otherwise complete — so it must carry no Note: line at all.
+  assert.doesNotMatch(text, /^[ \t]*Note:/im, "the dropped-count line must not be a Note:");
 });
 
 test("find_objects: sort desc + limit 1 — a newer semantic extra must not win", async () => {
@@ -549,6 +554,9 @@ test("find_objects: no title matches but the seed WAS truncated → non-confiden
   assert.match(text, /none of the 50 search results has a title containing "Roadmap"/i);
   assert.match(text, /may exist beyond them/);
   assert.match(text, /narrow title_hint/);
+  // A possible miss IS incompleteness: consumers that key on "Note:" (see the
+  // dropped-count test above) must not read this as a complete, empty sweep.
+  assert.match(text, /^[ \t]*Note:/im, "a truncated empty result must carry a Note: line");
 });
 
 test("find_objects: an all-punctuation title_hint cannot filter — the raw seed is used and a note says so", async () => {

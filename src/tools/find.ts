@@ -434,7 +434,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             return { content: [{ type: "text", text:
               `None of the ${SEARCH_LIMIT} search results has a title containing "${title_hint}" (Capacities search ` +
               `also returns matches by meaning) — a ${struct.title} with a matching title may exist beyond them; ` +
-              `narrow title_hint (live as of ${stamp}).` }] };
+              `narrow title_hint (live as of ${stamp}).\n\n` +
+              `Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.` }] };
           }
           return { content: [{ type: "text", text: `No ${struct.pluralName} found with a title matching "${title_hint}" (live as of ${stamp}).` }] };
         }
@@ -486,9 +487,12 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         });
 
         const header = `Found ${matches.length} ${struct.pluralName} matching "${title_hint}" (live as of ${stamp}):`;
+        // Contract: every "Note:" line means the result may be INCOMPLETE —
+        // personal-assistant's backfill_meeting_titles.py fails a run on any
+        // Note: line. Informational lines must not start with "Note:".
         const notes: string[] = [];
         if (seedTruncated) notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
-        if (droppedCount > 0) notes.push(`Note: ${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" (Capacities search also returns matches by meaning).`);
+        if (droppedCount > 0) notes.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
         if (!filterable) notes.push(`Note: title_hint "${title_hint}" has no letters or digits, so it could not be used as a title filter — results may include objects whose titles do not contain it.`);
         if (rateStopped) notes.push(`Note: rate budget reached — checked ${consideredCount} of ${titleSeed.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
         else if (planned < titleSeed.length) notes.push(`Note: fetched the first ${planned} of ${titleSeed.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
