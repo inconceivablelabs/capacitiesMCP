@@ -3,7 +3,9 @@
 // find_objects (cap-0yu) — a live LOCATE primitive. It composes the two read
 // endpoints the v2 API already gives us into a property/date/label/tag query the
 // API itself cannot express:
-//   stage 1  seed:   POST /objects/search (title-only) scoped to one structure
+//   stage 1  seed:   POST /objects/search scoped to one structure, then kept to
+//                    titles containing title_hint (the search also returns
+//                    matches by meaning — cap-1kc)
 //   stage 2  fetch:  GET /object (JSON) per candidate, paced by a WaitBudget
 //   stage 3  filter + sort client-side over the typed property values
 // It returns ids + titles + the surfaced (filtered/sorted) property values and NO
@@ -22,7 +24,7 @@ import {
 import { CapacitiesStructure } from "../client/types.js";
 import { PropertyIndex, buildPropertyIndex, resolvePropertyKey } from "./object.js";
 import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
-import { normalizeName as normalize } from "../utils/normalize.js";
+import { normalizeName as normalize, normalizeForTitleMatch, matchesTitle } from "../utils/normalize.js";
 
 // --- Read-shape value extractors -------------------------------------------
 // GET /object (JSON) returns `properties` as a map of property-definition-id →
@@ -351,7 +353,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
       title: "Find Capacities Objects",
       description:
         "Locate objects by a property/date/label/tag the API cannot search on. It seeds a title search " +
-        "(the only query the API allows), fetches candidates, then filters and sorts client-side. Returns " +
+        "(the only query the API allows), fetches candidates, then filters and sorts client-side. Results are " +
+        "limited to objects whose title contains `title_hint` (case, accents and punctuation ignored). Returns " +
         "matching ids + titles + the filtered/sorted property values — NO bodies (read a match's body with " +
         "get_object). REQUIRED: `title_hint` (a non-empty title seed) and `structure` (NAME or id from " +
         "get_space_info). `filters` are keyed by property NAME or id: a date value is an ISO string (equals, " +
@@ -413,10 +416,26 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
           budget
         );
+        // Truncation is a property of the RAW search: at the cap, a title match
+        // may sit beyond it whatever the filter below keeps.
         const seedTruncated = seed.length >= SEARCH_LIMIT;
         const stamp = new Date().toISOString();
 
-        if (seed.length === 0) {
+        // cap-1kc: the search also returns objects related BY MEANING, interleaved
+        // by relevance — a semantic extra can be a newer dated object and win a
+        // sort-desc + limit-1. Keep only title matches. A hint that normalizes to
+        // "" (all punctuation) cannot filter, so the raw seed is used as before.
+        const filterable = normalizeForTitleMatch(title_hint) !== "";
+        const titleSeed = filterable ? seed.filter(r => matchesTitle(r.title, title_hint)) : seed;
+        const droppedCount = seed.length - titleSeed.length;
+
+        if (titleSeed.length === 0) {
+          if (seedTruncated) {
+            return { content: [{ type: "text", text:
+              `None of the ${SEARCH_LIMIT} search results has a title containing "${title_hint}" (Capacities search ` +
+              `also returns matches by meaning) — a ${struct.title} with a matching title may exist beyond them; ` +
+              `narrow title_hint (live as of ${stamp}).` }] };
+          }
           return { content: [{ type: "text", text: `No ${struct.pluralName} found with a title matching "${title_hint}" (live as of ${stamp}).` }] };
         }
 
@@ -427,12 +446,12 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         // NOTE: zod's .default(30) is applied by the MCP SDK's input parse, NOT on a
         // direct handler call (tests invoke the handler directly), so default here too.
         const cap = fetch_cap ?? 30;
-        const planned = Math.min(seed.length, cap);
+        const planned = Math.min(titleSeed.length, cap);
         const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
         let rateStopped = false;
         let erroredCount = 0;
         for (let i = 0; i < planned; i++) {
-          const cand = seed[i];
+          const cand = titleSeed[i];
           try {
             const obj = await client.getObject(cand.id, budget);
             fetched.push({ id: cand.id, title: cand.title, props: (obj.properties ?? {}) as Record<string, any> });
@@ -469,8 +488,10 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const header = `Found ${matches.length} ${struct.pluralName} matching "${title_hint}" (live as of ${stamp}):`;
         const notes: string[] = [];
         if (seedTruncated) notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
-        if (rateStopped) notes.push(`Note: rate budget reached — checked ${consideredCount} of ${seed.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
-        else if (planned < seed.length) notes.push(`Note: fetched the first ${planned} of ${seed.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
+        if (droppedCount > 0) notes.push(`Note: ${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" (Capacities search also returns matches by meaning).`);
+        if (!filterable) notes.push(`Note: title_hint "${title_hint}" has no letters or digits, so it could not be used as a title filter — results may include objects whose titles do not contain it.`);
+        if (rateStopped) notes.push(`Note: rate budget reached — checked ${consideredCount} of ${titleSeed.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
+        else if (planned < titleSeed.length) notes.push(`Note: fetched the first ${planned} of ${titleSeed.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
         else if (erroredCount > 0) notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
 
         const body = blocks.length ? blocks.join("\n---\n") : "(no candidates matched the filters)";

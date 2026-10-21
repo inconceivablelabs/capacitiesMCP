@@ -61,7 +61,9 @@ export async function resolveEntities(
 
   for (const name of uniqueNames) {
     const target = normalizeName(name);
-    // cap-6dy.22: v2 search is title-only, caps `limit` at 50, has no pagination,
+    // cap-6dy.22: v2 search matches titles (and, since cap-1kc, may also return
+    // objects related BY MEANING — harmless here, the exact-title filter below
+    // drops them, though they can take result slots), caps `limit` at 50, has no pagination,
     // no exact-title query mode, and no total/hasMore in the response. Live probing
     // (2026-07-12) shows exact-title matches DO rank first, so a *unique* exact
     // match is very unlikely to be pushed past hit 50 — but we can't prove ranking,

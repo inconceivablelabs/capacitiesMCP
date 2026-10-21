@@ -1,6 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CapacitiesClient } from "../client/capacities.js";
+import { SearchResult } from "../client/types.js";
+import { normalizeForTitleMatch, matchesTitle } from "../utils/normalize.js";
+
+const RELATED_LABEL = "Related by meaning (title does not contain the query):";
+
+function formatResults(results: SearchResult[]): string {
+  return results.map(result => {
+    return `**${result.title}**\nID: ${result.id}\nType: ${result.structureId}\n`;
+  }).join("\n---\n");
+}
 
 export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
   // Search content tool
@@ -8,7 +18,11 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
     "search_content",
     {
       title: "Search Capacities Content",
-      description: "Search Capacities objects by title match in your space. Optionally scope by structureIds (from get_space_info) and cap results with limit.",
+      description:
+        "Search Capacities objects in your space by title. When Capacities has semantic search enabled for " +
+        "the account, it also returns objects related by meaning; those are listed after the title matches " +
+        "under a \"Related by meaning\" label. `limit` caps the combined list. Optionally scope by " +
+        "structureIds (from get_space_info).",
       inputSchema: {
         query: z.string().describe("Search query or keywords"),
         structureIds: z.array(z.string()).optional().describe("Optional structure IDs to scope the search to (from get_space_info)"),
@@ -33,14 +47,31 @@ export function setupSearchTools(server: McpServer, client: CapacitiesClient) {
           };
         }
 
-        const formattedResults = results.map(result => {
-          return `**${result.title}**\nID: ${result.id}\nType: ${result.structureId}\n`;
-        }).join("\n---\n");
+        // cap-1kc: the search also returns objects that match BY MEANING,
+        // interleaved by relevance, and a row does not say which kind it is. Keep
+        // them all, but list title matches first and label the rest. An
+        // all-punctuation query cannot be classified, so it renders as before.
+        const filterable = normalizeForTitleMatch(query) !== "";
+        const titleMatches = filterable ? results.filter(r => matchesTitle(r.title, query)) : results;
+        const related = filterable ? results.filter(r => !matchesTitle(r.title, query)) : [];
 
+        if (related.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `Found ${results.length} results for "${query}":\n\n${formatResults(results)}`
+            }]
+          };
+        }
+
+        const header = `Found ${results.length} results for "${query}" (${titleMatches.length} title matches, ${related.length} related by meaning):`;
+        const sections: string[] = [];
+        if (titleMatches.length > 0) sections.push(formatResults(titleMatches));
+        sections.push(`${RELATED_LABEL}\n\n${formatResults(related)}`);
         return {
           content: [{
             type: "text",
-            text: `Found ${results.length} results for "${query}":\n\n${formattedResults}`
+            text: `${header}\n\n${sections.join("\n---\n\n")}`
           }]
         };
       } catch (error) {

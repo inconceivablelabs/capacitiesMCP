@@ -128,3 +128,74 @@ test("get_space_info renders without throwing when a structure is missing collec
   assert.equal(res.isError, undefined, "must not surface an error");
   assert.match(res.content[0].text, /\*\*Task\*\*/);
 });
+
+// === cap-1kc: search_content labels matches BY MEANING =====================
+// /objects/search interleaves semantic hits with title matches. search_content
+// keeps them all but lists title matches first, then a labelled section.
+// Synthetic titles only — this repo is public.
+
+function getSearch() {
+  const { server, tools } = makeServerStub();
+  const client = new CapacitiesClient({ apiToken: "test-token", baseUrl: "https://api.capacities.io" });
+  setupSearchTools(server, client);
+  return tools["search_content"];
+}
+
+test("search_content: title matches first (server order), then a labelled related-by-meaning section (server order)", async () => {
+  installFetch({ results: [
+    { id: "x1", title: "Quarterly Planning", structureId: "meeting" },
+    { id: "a1", title: "Alpha/Beta 1:1", structureId: "meeting" },
+    { id: "x2", title: "Team Offsite", structureId: "meeting" },
+    { id: "a2", title: "Alpha  Beta Sync", structureId: "meeting" }
+  ] });
+  const res = await getSearch().handler({ query: "alpha beta" });
+  const text: string = res.content[0].text;
+
+  assert.equal(res.isError, undefined);
+  assert.match(text, /^Found 4 results for "alpha beta" \(2 title matches, 2 related by meaning\):/);
+  const label = "Related by meaning (title does not contain the query):";
+  const order = ["ID: a1", "ID: a2", label, "ID: x1", "ID: x2"].map(s => text.indexOf(s));
+  assert.ok(order.every(i => i >= 0), `every marker present: ${order}`);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), "a1, a2, label, x1, x2 in that order");
+});
+
+test("search_content: only semantic hits → zero title matches, all under the label", async () => {
+  installFetch({ results: [
+    { id: "x1", title: "Quarterly Planning", structureId: "meeting" }
+  ] });
+  const res = await getSearch().handler({ query: "roadmap" });
+  const text: string = res.content[0].text;
+  assert.match(text, /^Found 1 results for "roadmap" \(0 title matches, 1 related by meaning\):/);
+  assert.ok(text.indexOf("Related by meaning") < text.indexOf("ID: x1"));
+});
+
+test("search_content: no semantic hits → today's header and no related section", async () => {
+  installFetch({ results: [
+    { id: "a1", title: "Weekly Connect", structureId: "meeting" },
+    { id: "a2", title: "Connect Retro", structureId: "meeting" }
+  ] });
+  const res = await getSearch().handler({ query: "connect" });
+  const text: string = res.content[0].text;
+  assert.match(text, /^Found 2 results for "connect":\n/);
+  assert.doesNotMatch(text, /related by meaning/i);
+  assert.ok(text.indexOf("ID: a1") < text.indexOf("ID: a2"));
+});
+
+test("search_content: an all-punctuation query is rendered unpartitioned in server order", async () => {
+  installFetch({ results: [
+    { id: "x1", title: "Quarterly Planning", structureId: "meeting" },
+    { id: "a1", title: "A/B", structureId: "meeting" }
+  ] });
+  const res = await getSearch().handler({ query: "//" });
+  const text: string = res.content[0].text;
+  assert.match(text, /^Found 2 results for "\/\/":\n/);
+  assert.doesNotMatch(text, /related by meaning/i);
+  assert.ok(text.indexOf("ID: x1") < text.indexOf("ID: a1"), "server order kept");
+});
+
+test("search_content: description explains semantic matches and the combined limit", () => {
+  const desc: string = getSearch().config.description;
+  assert.match(desc, /related by meaning/i);
+  assert.match(desc, /listed after the title matches/i);
+  assert.match(desc, /limit.*combined/i);
+});

@@ -440,3 +440,135 @@ test("find_objects: a non-rate read error skips the candidate and still returns 
   assert.match(res.content[0].text, /1 candidate\(s\) could not be read and were skipped/);
   assert.match(res.content[0].text, /ID: m1/);
 });
+
+// === cap-1kc: the seed search also returns matches BY MEANING ==============
+// POST /objects/search interleaves semantic hits with title matches. find_objects
+// must drop them before stage 2, so an extra is never fetched and never answers.
+// Synthetic titles only — this repo is public.
+
+// ids handed to GET /object, in call order — asserts on the ARGUMENT, not the output.
+function fetchedIds(calls: FCall[]): string[] {
+  return calls
+    .filter(c => (c.opts?.method ?? "GET") === "GET" && c.url.includes("/object?id="))
+    .map(c => decodeURIComponent(c.url.match(/\/object\?id=([^&]+)/)![1]));
+}
+
+test("find_objects: semantic extras in the seed are never fetched, never returned, and counted in a note", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "x1", title: "Team Offsite - 2026-07-10", structureId: "meeting" },          // rank 0 extra
+      { id: "m1", title: "Weekly Roadmap Review - 2026-07-07", structureId: "meeting" },
+      { id: "x2", title: "Quarterly Planning", structureId: "meeting" },
+      { id: "m2", title: "weekly  roadmap/review", structureId: "meeting" }
+    ] },
+    objects: {
+      x1: meetingObj("x1", {}), m1: meetingObj("m1", {}),
+      x2: meetingObj("x2", {}), m2: meetingObj("m2", {})
+    }
+  }));
+
+  const res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review" });
+
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "only title matches reach stage 2");
+  const text = res.content[0].text;
+  assert.match(text, /Found 2 Meetings/);
+  assert.match(text, /ID: m1/);
+  assert.match(text, /ID: m2/);
+  assert.doesNotMatch(text, /ID: x1/);
+  assert.doesNotMatch(text, /ID: x2/);
+  assert.match(text, /2 search result\(s\) were ignored because their titles don't contain "Weekly Roadmap Review"/);
+  assert.match(text, /matches by meaning/);
+});
+
+test("find_objects: sort desc + limit 1 — a newer semantic extra must not win", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "x1", title: "Staff Meeting - 2026-07-10", structureId: "meeting" },
+      { id: "m1", title: "Weekly Roadmap Review", structureId: "meeting" },
+      { id: "m2", title: "Weekly Roadmap Review", structureId: "meeting" }
+    ] },
+    objects: {
+      x1: meetingObj("x1", { date: dateProp("2026-07-10T15:00:00.000Z") }), // newest — but not a title match
+      m1: meetingObj("m1", { date: dateProp("2026-07-07T15:00:00.000Z") }),
+      m2: meetingObj("m2", { date: dateProp("2026-06-30T15:00:00.000Z") })
+    }
+  }));
+  const res = await handler({
+    structure: "Meeting", title_hint: "Weekly Roadmap Review",
+    filters: { Date: { before: "2026-07-13" } }, sort: { by: "Date", order: "desc" }, limit: 1
+  });
+  assert.equal(res.isError, undefined);
+  assert.equal(fetchedIds(calls).includes("x1"), false, "the extra is never fetched");
+  assert.match(res.content[0].text, /ID: m1/);
+  assert.doesNotMatch(res.content[0].text, /ID: x1/);
+});
+
+test("find_objects: fetch_cap and candidate counts are over the title matches, not the raw seed", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { Note: [
+      { id: "x1", title: "Journal", structureId: "meeting" },
+      { id: "m1", title: "Note A", structureId: "meeting" },
+      { id: "x2", title: "Diary", structureId: "meeting" },
+      { id: "m2", title: "Note B", structureId: "meeting" },
+      { id: "m3", title: "Note C", structureId: "meeting" }
+    ] }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2 });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"]);
+  assert.match(res.content[0].text, /fetched the first 2 of 3 candidates/);
+});
+
+test("find_objects: no title matches and the seed was NOT truncated → the existing not-found text, nothing fetched", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "x1", title: "Quarterly Planning", structureId: "meeting" },
+      { id: "x2", title: "Team Offsite", structureId: "meeting" }
+    ] }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review" });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), []);
+  assert.match(res.content[0].text, /No Meetings found with a title matching "Weekly Roadmap Review"/);
+});
+
+test("find_objects: no title matches but the seed WAS truncated → non-confident text, not 'No … found'", async () => {
+  const handler = getFind();
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ id: `x${i}`, title: `Related Thing ${i}`, structureId: "meeting" }));
+  const calls = installFind(findRouter({ search: { Roadmap: fifty } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Roadmap" });
+  assert.equal(res.isError, undefined, "a possible miss beyond the cap is not an error");
+  assert.deepEqual(fetchedIds(calls), []);
+  const text = res.content[0].text;
+  assert.doesNotMatch(text, /No Meetings found/);
+  assert.match(text, /none of the 50 search results has a title containing "Roadmap"/i);
+  assert.match(text, /may exist beyond them/);
+  assert.match(text, /narrow title_hint/);
+});
+
+test("find_objects: an all-punctuation title_hint cannot filter — the raw seed is used and a note says so", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { "///": [
+      { id: "m1", title: "Alpha", structureId: "meeting" },
+      { id: "m2", title: "Beta", structureId: "meeting" }
+    ] }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "///" });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"]);
+  assert.match(res.content[0].text, /could not be used as a title filter/);
+  assert.doesNotMatch(res.content[0].text, /were ignored/);
+});
+
+test("find_objects: the description says results are limited to titles containing title_hint", () => {
+  const tools: Record<string, any> = {};
+  const server: any = { registerTool(name: string, config: any, handler: any) { tools[name] = { name, config, handler }; } };
+  setupFindTools(server, findClient());
+  assert.match(tools["find_objects"].config.description, /limited to objects whose title contains `title_hint`/);
+});
