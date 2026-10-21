@@ -166,7 +166,10 @@ test("search_content: only semantic hits → zero title matches, all under the l
   const res = await getSearch().handler({ query: "roadmap" });
   const text: string = res.content[0].text;
   assert.match(text, /^Found 1 results for "roadmap" \(0 title matches, 1 related by meaning\):/);
-  assert.ok(text.indexOf("Related by meaning") < text.indexOf("ID: x1"));
+  // Assert presence first: an absent label's indexOf is -1, which would pass the order check.
+  const labelAt = text.indexOf("Related by meaning (title does not contain the query):");
+  assert.ok(labelAt >= 0, "label present");
+  assert.ok(labelAt < text.indexOf("ID: x1"));
 });
 
 test("search_content: no semantic hits → today's header and no related section", async () => {
