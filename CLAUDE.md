@@ -50,10 +50,12 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   `CapacitiesAPIError("RATE_LIMIT_EXCEEDED", …, {retryAfterMs})` rather than silently sleeping.
 
 #### Tools Layer (`src/tools/`)
-- **`search.ts`**: `search_content` (title match, optional `structureIds`/`limit`),
+- **`search.ts`**: `search_content` (title match, optional `structureIds`/`limit`; semantic
+  "related by meaning" hits are kept but listed after the title matches and labelled — cap-1kc),
   `list_spaces` (the one scoped space), `get_space_info` (structures + property ids, types,
   `writable`, label options, relation targets).
-- **`find.ts`**: `find_objects` — live LOCATE primitive: title-seed search →
+- **`find.ts`**: `find_objects` — live LOCATE primitive: title-seed search, kept to titles
+  containing `title_hint` via `matchesTitle` (`utils/normalize.ts`; drops semantic hits — cap-1kc) →
   per-candidate `GET /object` (JSON, paced) → client-side filter/sort over typed
   property values. Returns ids+titles+surfaced values, NO bodies (compose with
   `get_object`). No persistent state (cap-0yu).

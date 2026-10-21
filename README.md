@@ -68,8 +68,8 @@ The Docker image uses `server/`, which contains only the runtime package and com
 
 | Tool | Description |
 |------|-------------|
-| `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`) |
-| `find_objects` | Locate objects by a property the API can't search on — date, label/status, tag/relation, or scalar. Seeds a title search, then filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). Dates are absolute ISO (equals or `{after,before}` range) |
+| `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`). When Capacities has semantic search enabled, objects related by meaning are also returned, listed after the title matches under a "Related by meaning" label; `limit` caps the combined list |
+| `find_objects` | Locate objects by a property the API can't search on — date, label/status, tag/relation, or scalar. Seeds a title search (results limited to titles containing `title_hint`), then filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). Dates are absolute ISO (equals or `{after,before}` range) |
 | `list_spaces` | Show the space your API token is scoped to |
 | `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
