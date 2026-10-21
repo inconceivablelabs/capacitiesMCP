@@ -2,16 +2,23 @@
 
 An MCP server for [Capacities](https://capacities.io): search, property-based object lookup, object CRUD, save weblinks, and daily notes from any MCP-compatible client.
 
-> **⚠️ Upgrade to 2.x.** Version **2.x runs on the Capacities v2 REST API**. Version **1.x used the
-> Capacities Beta API, which Capacities discontinues on September 1, 2026.** On that date, 1.x builds
-> (and any `.dxt` packaged before v2.0.0) **stop working**. Reinstall the current
-> `capacities-desktop-extension.dxt` (v2.x) to keep the integration working. See the
+> **⚠️ Use 2.x.** Version **2.x runs on Capacities' current REST API**. Version **1.x used the
+> Capacities Beta API, which Capacities scheduled for discontinuation on September 1, 2026**;
+> 1.x builds (and any `.dxt` packaged before v2.0.0) depend on it. Reinstall the current
+> `capacities-desktop-extension.dxt` (v2.x). See the
 > [Capacities API notice](https://docs.capacities.io/developer/api).
+>
+> **About the name "v2".** Capacities' own docs call the current API **"v1"** (their Beta was
+> the first API). This repo calls it **v2** because it is the second API this server has run
+> on. Same API, two names.
 
 ## Prerequisites
 
 - A [Capacities](https://capacities.io) account with API access
-- An API token (Capacities Desktop App → Settings → API → Generate token)
+- An API token: Capacities desktop app → Settings → Capacities API → Generate new token. Each
+  token is scoped to **one space** and is either read-only or read-write; tools that write need
+  a read-write token.
+- To run from source: Node.js 22 (the version the Docker image runs)
 
 ## Installation
 
@@ -62,7 +69,8 @@ docker run -d \
   capacities-mcp
 ```
 
-The Docker image uses `server/`, which contains only the runtime package and compiled output, with no source or dev dependencies.
+The image is based on `node:22-slim`. Its runtime stage installs only `server/`'s production
+dependencies and the compiled output, with no source or dev dependencies.
 
 ## Available tools
 
@@ -128,6 +136,43 @@ Category, and Topic cannot be set on a weblink through the API.** To tag a webli
 > as the Capacities API allows updating media objects, this server will add full weblink
 > property support (tags / Category / Topic via `save_weblink`). Until then, `#tag`-in-notes is
 > the available path.
+
+## Rate limits
+
+Capacities enforces rate limits on its servers, per token and per endpoint (see its
+[rate-limiting docs](https://developers.capacities.io/api/overview/rate-limiting)). In our
+measurements against `/object` the window is **rolling**: slots free up one at a time as each request ages out of
+the trailing 60 seconds. This server also runs a client-side, per-endpoint limiter, and its
+multi-call tools (`find_objects`, and `create_object`/`update_object` with many relations) pace
+themselves against it. That limiter is best-effort: it cannot see other clients using the same
+token or network. **If a tool returns `RATE_LIMIT_EXCEEDED`, wait and retry** rather than trying
+to predict the window.
+
+## Why this server?
+
+*As of 2026-10-21: [`@capacities/api`](https://www.npmjs.com/package/@capacities/api) 1.1.3,
+and the official MCP server as documented at
+[docs.capacities.io/developer/model-context-protocol](https://docs.capacities.io/developer/model-context-protocol).
+Both are moving, so check them before relying on this table.*
+
+| | This server | Official Capacities MCP server | `@capacities/api` SDK |
+|---|---|---|---|
+| What it is | Local MCP server (stdio), personal API token | Hosted MCP server at `https://api.capacities.io/mcp`, OAuth 2.1 | TypeScript client library, not an MCP server |
+| Setup | `.dxt`, Node, or Docker; token in env | Add the URL to your MCP client and sign in. The space must have AI Assistant enabled | `npm install`, then write your own code |
+| Coverage | The 11 tools above | Search, read, create (pages, tasks, any type), update properties, append, **block-level edits**, **file upload**, list by type/tag/collection, object links | **All 22 REST endpoints**, plus OAuth with token refresh |
+| Relations and tags on create/update | Set by name, resolved strictly. Unknown or ambiguous names fail before anything is written (auto-create is opt-in) | Properties are set from frontmatter; how relation names are resolved is not documented | You pass ids; name lookup is up to you |
+| Property keys | Property name or id | Frontmatter keys | Ids |
+| Filter by date, label, relation or value | `find_objects` | List by object type, tag or collection; other filters not documented | Not provided |
+| Search output | Title matches first; semantic hits labelled "Related by meaning" | Title and semantic search ranked together | The raw API response |
+| Client-side rate pacing | Per endpoint, best-effort | n/a (hosted) | None; the only retry is a 401 under OAuth |
+
+**Pick the official server** if you want block-level editing, file uploads, OAuth instead of a
+token, or a connector that works in hosted chat apps with nothing to install. **Pick the SDK** if
+you are writing your own code: it is the complete client. Note that 1.1.3 needs **zod 4** at
+runtime even though its peer range also allows zod 3 (under zod 3.25 its import fails with
+`.meta is not a function`). **Pick this server** if your MCP client does typed, relation-heavy
+writes that must be validated before anything is saved, or needs to find objects by property
+value.
 
 ## Configuration
 
