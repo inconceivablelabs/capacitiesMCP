@@ -1215,6 +1215,11 @@ test("find_objects: no filters and no sort → ZERO GET /object, most recent fir
   assert.match(text, /^Note: showing the first 30 of 40 matching Meetings \(limit\) — raise limit or narrow the seed\.$/m);
   assert.equal(res.structuredContent.candidates_complete, false);
   assert.equal(res.structuredContent.returned, 30);
+  // D3 on the zero-GET path: every candidate "matches" (no filters), so matched is the
+  // whole seed and the cut shows as matched 40 vs returned 30; nothing was read or errored.
+  assert.equal(res.structuredContent.matched, 40);
+  assert.equal(res.structuredContent.considered, 40);
+  assert.equal(res.structuredContent.errored, 0);
 
   // limit governs the cap; a cap that does not bite is complete.
   handler = getFind();
@@ -1224,6 +1229,12 @@ test("find_objects: no filters and no sort → ZERO GET /object, most recent fir
   assert.match(text, /^Found 40 Meetings/);
   assert.doesNotMatch(text, /^[ \t]*Note:/im);
   assert.equal(res.structuredContent.candidates_complete, true);
+  // A full answer: both flags true AND matched === returned (D3).
+  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(res.structuredContent.returned, 40);
+  assert.equal(res.structuredContent.matched, res.structuredContent.returned);
+  assert.equal(res.structuredContent.considered, 40);
+  assert.equal(res.structuredContent.errored, 0);
 
   // Known-positive: with a sort, stage 2 runs and the GET channel is live.
   // Fake clock: 30 GETs equals the object window, so on a real clock an
