@@ -1443,3 +1443,17 @@ test("find_objects: five relation filters plus a label and a date filter are acc
   assert.equal(fetchedIds(calls).length, 30);
   assert.equal(calls.length, MAX_REQUESTS_PER_CALL);
 });
+
+test("find_objects: a listing call that FAILED still counts against the request budget (requestsIssued, not pagesRead)", async () => {
+  // 1 structure read + 2 listing calls (page 2 fails) = 3 spent; 45 - 3 = 42 GETs, not 43.
+  const clock = fakeClock();
+  const handler = getFind(clock);
+  const calls = installFind(enumRouter({ structurePages: { meeting: onePageThenFail(100, { status: 500, text: "boom" }) } }));
+  const res = await handler({ structure: "Meeting", sort: SORT_DATE_DESC, fetch_cap: 50 });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 2, "fixture: page 1 read, page 2 failed");
+  assert.equal(fetchedIds(calls).length, 42);
+  assert.equal(calls.length, MAX_REQUESTS_PER_CALL);
+  assert.match(res.content[0].text, /^Note: fetched the first 42 of 100 candidates \(per-call request budget of 45\)/m);
+  assert.deepEqual(clock.sleeps, [60000], "42 GETs cross the 30/60s object window once, through the fake clock");
+});
