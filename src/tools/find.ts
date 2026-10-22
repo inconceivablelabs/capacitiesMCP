@@ -28,6 +28,7 @@ import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
 import { enumerateAll, EnumerationResult } from "./enumerate.js";
 import { normalizeName as normalize, normalizeForTitleMatch, matchesTitle } from "../utils/normalize.js";
 import { isSpecUuid } from "../utils/validation.js";
+import { parseTitleDate, orderEnumerated } from "../utils/title-date.js";
 
 // --- Seed shapes + exactness (cap-i93) --------------------------------------
 
@@ -613,14 +614,62 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           return { content: [{ type: "text", text: noneText(stamp) }], structuredContent: exactness };
         }
 
+        // A listing has no useful order of its own, so put the most recent title
+        // dates first BEFORE anything is cut; a search keeps its rank order. Only an
+        // ascending sort on a date property flips that (design § Stage 2 (a)).
+        const enumerated = seedMethod !== "search";
+        const dir: "asc" | "desc" =
+          compiledSort?.order === "asc" && index.byId.get(compiledSort.propId)?.type === "date" ? "asc" : "desc";
+        if (enumerated) candidates = orderEnumerated(candidates, dir);
+        const seedSize = candidates.length;
+        // When no title carries a date the ordering above is a no-op, so a cut keeps
+        // listing order — say so, rather than let it pass for "most recent" (S-M1).
+        const undatedLine = (kept: number): string | null =>
+          enumerated && kept < seedSize && candidates.every(c => parseTitleDate(c.title) === null)
+            ? `(None of the ${seedSize} candidate titles carries a date, so the ${kept} kept were taken in listing order, not by date.)`
+            : null;
+
+        // Contract: every "Note:" line means the result may be INCOMPLETE —
+        // personal-assistant's backfill_meeting_titles.py fails a run on any
+        // Note: line. Informational lines must not start with "Note:".
+
+        // Short-circuit: nothing to filter or sort on means nothing to surface, so
+        // list the seed itself with zero GET /object (design Example C).
+        if (compiled.length === 0 && !compiledSort) {
+          const rows = candidates.slice(0, limit ?? 30);
+          const info = [...infoLines];
+          const undated = undatedLine(rows.length);
+          if (undated) info.push(undated);
+          const notes = [...stage1Notes];
+          if (rows.length < seedSize) {
+            notes.push(`Note: showing the first ${rows.length} of ${seedSize} matching ${plural} (limit) — raise limit or narrow the seed.`);
+          }
+          const trailer = [...info, ...notes];
+          const body = rows.length
+            ? rows.map(r => `**${r.title}**\nID: ${r.id}`).join("\n---\n")
+            : `(no matching ${plural} in the part of the listing that was read)`;
+          const exactness: FindExactness = {
+            seed_method: seedMethod,
+            seed_complete: seedComplete,
+            candidates_complete: rows.length === seedSize,
+            seed_size: seedSize,
+            considered: seedSize,
+            errored: 0,
+            matched: seedSize,
+            returned: rows.length
+          };
+          const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
+          return { content: [{ type: "text", text: `${header(rows.length, stamp)}\n\n${body}${noteLine}` }], structuredContent: exactness };
+        }
+
         // 4. Fetch candidates (object bucket, paced) — one GET /object per
-        //    candidate, up to fetch_cap, in seed order. Fail-open: a rate
+        //    candidate, up to fetch_cap, in the order above. Fail-open: a rate
         //    stop ends the loop with partial results; a non-rate read error skips
         //    the candidate and continues.
         // NOTE: zod's .default(30) is applied by the MCP SDK's input parse, NOT on a
         // direct handler call (tests invoke the handler directly), so default here too.
         const cap = fetch_cap ?? 30;
-        const planned = Math.min(candidates.length, cap);
+        const planned = Math.min(seedSize, cap);
         const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
         let rateStopped = false;
         let erroredCount = 0;
@@ -646,7 +695,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             compareForSort(sortKey(a.props[cs.propId]), sortKey(b.props[cs.propId]), cs.order)
           );
         }
-        const matchedCount = matches.length;
+        const matchedCount = matches.length;   // D3: before the limit slice
         if (limit !== undefined) matches = matches.slice(0, limit);
 
         // 7. Surface only the filtered + sorted property values (P9 — not a full dump).
@@ -660,28 +709,40 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           return lines.join("\n");
         });
 
-        // Contract: every "Note:" line means the result may be INCOMPLETE —
-        // personal-assistant's backfill_meeting_titles.py fails a run on any
-        // Note: line. Informational lines must not start with "Note:".
+        const stage2Info: string[] = [];
+        if (compiledSort && consideredCount < seedSize) {
+          stage2Info.push(`(Sorted within the ${consideredCount} fetched candidates only — the true first/last by ${compiledSort.propName} may lie among the ${seedSize - consideredCount} candidates not fetched.)`);
+        }
+        // Trimming to the caller's limit is what they asked for, not incompleteness.
+        if (limit !== undefined && matchedCount > limit) stage2Info.push(`(showing ${limit} of ${matchedCount} matches — limit)`);
+        const undated = undatedLine(planned);
+        if (undated) stage2Info.push(undated);
+
         const stage2Notes: string[] = [];
-        if (rateStopped) stage2Notes.push(`Note: rate budget reached — checked ${consideredCount} of ${candidates.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
-        else if (planned < candidates.length) stage2Notes.push(`Note: fetched the first ${planned} of ${candidates.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
+        if (rateStopped) stage2Notes.push(`Note: rate budget reached — checked ${consideredCount} of ${seedSize} candidates; results may be incomplete (retry shortly or narrow the query).`);
+        else if (planned < seedSize) {
+          const order = !enumerated ? "in search-rank order" : dir === "asc" ? "oldest first by title date" : "most recent first by title date";
+          stage2Notes.push(`Note: fetched the first ${planned} of ${seedSize} candidates (fetch_cap) ${order}; raise fetch_cap or narrow the seed.`);
+        }
         else if (erroredCount > 0) stage2Notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
-        const trailer = [...infoLines, ...stage1Notes, ...stage2Notes];
+        const trailer = [...infoLines, ...stage2Info, ...stage1Notes, ...stage2Notes];
 
         // An empty candidate list here is a PARTIAL none (the listing stopped
-        // early): never rendered as "No … found".
+        // early): never rendered as "No … found". Filters run over a sample when
+        // not every candidate was fetched, so an empty result says so.
         const body = blocks.length
           ? blocks.join("\n---\n")
-          : candidates.length === 0
+          : seedSize === 0
             ? `(no matching ${plural} in the part of the listing that was read)`
-            : "(no candidates matched the filters)";
+            : consideredCount < seedSize
+              ? `(none of the ${consideredCount} fetched candidates matched the filters — ${seedSize - consideredCount} were not fetched)`
+              : "(no candidates matched the filters)";
         const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
         const exactness: FindExactness = {
           seed_method: seedMethod,
           seed_complete: seedComplete,
-          candidates_complete: !rateStopped && planned === candidates.length && erroredCount === 0,
-          seed_size: candidates.length,
+          candidates_complete: !rateStopped && planned === seedSize && erroredCount === 0,
+          seed_size: seedSize,
           considered: consideredCount,
           errored: erroredCount,
           matched: matchedCount,

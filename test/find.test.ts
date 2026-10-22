@@ -401,7 +401,7 @@ test("find_objects: fetch_cap below the candidate count emits the fetch-cap note
     ] },
     objects: { m1: meetingObj("m1", {}), m2: meetingObj("m2", {}), m3: meetingObj("m3", {}) }
   }));
-  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2 });
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /fetched the first 2 of 3 candidates/);
 });
@@ -417,7 +417,7 @@ test("find_objects: a 429 mid-fetch → fail-open partial results with checked-N
     objects: { m1: meetingObj("m1", {}) },
     getFail: { m2: { status: 429, text: "slow down" } }
   }));
-  const res = await handler({ structure: "Meeting", title_hint: "Note" });
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined, "partial results are NOT an error (fail-open)");
   assert.match(res.content[0].text, /rate budget reached — checked 1 of 3 candidates/);
   assert.match(res.content[0].text, /ID: m1/);
@@ -433,7 +433,7 @@ test("find_objects: a non-rate read error skips the candidate and still returns 
     objects: { m1: meetingObj("m1", {}) },
     getFail: { m2: { status: 500, text: "boom" } }
   }));
-  const res = await handler({ structure: "Meeting", title_hint: "Note" });
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /1 candidate\(s\) could not be read and were skipped/);
   assert.match(res.content[0].text, /ID: m1/);
@@ -466,7 +466,7 @@ test("find_objects: semantic extras in the seed are never fetched, never returne
     }
   }));
 
-  const res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review" });
+  const res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review", sort: { by: "Date", order: "asc" } });
 
   assert.equal(res.isError, undefined);
   assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "only title matches reach stage 2");
@@ -520,7 +520,7 @@ test("find_objects: fetch_cap and candidate counts are over the title matches, n
       { id: "m3", title: "Note C", structureId: "meeting" }
     ] }
   }));
-  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2 });
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
   assert.deepEqual(fetchedIds(calls), ["m1", "m2"]);
   assert.match(res.content[0].text, /fetched the first 2 of 3 candidates/);
@@ -1146,4 +1146,178 @@ test("find_objects: every title-filtering path uses the shared matcher — an ac
   found.tagTitle = res.content[0].text.includes(`ID: ${uid(7)}`);
   // One deepEqual, so a failure shows WHICH surface lost the shared matcher (one mutation, three surfaces).
   assert.deepEqual(found, { search: true, escalated: true, tagTitle: true });
+});
+
+// === cap-i93 Task 7: ordering before truncation, zero-GET short-circuit =====
+
+const ORDER_FIXTURE: Summary[] = [
+  { id: uid(1), title: "Sync - 2024-01-10", structureId: "meeting" },
+  { id: uid(2), title: "Kickoff", structureId: "meeting" },
+  { id: uid(3), title: "Sync - 2026-03-01", structureId: "meeting" },
+  { id: uid(4), title: "", structureId: "meeting" },
+  { id: uid(5), title: "Sync - 2025-06-15", structureId: "meeting" },
+  { id: uid(6), title: "Retro (May 19, 2026)", structureId: "meeting" }
+];
+
+test("find_objects: enumerated candidates are ordered by title date BEFORE fetch_cap truncates", async () => {
+  const cases: [string, any, string[]][] = [
+    ["sort Date desc → newest three", SORT_DATE_DESC, [uid(6), uid(3), uid(5)]],
+    ["sort Date asc → oldest three", { by: "Date", order: "asc" }, [uid(1), uid(5), uid(3)]],
+    ["sort by a LABEL asc → direction ignored, newest three", { by: "Status", order: "asc" }, [uid(6), uid(3), uid(5)]]
+  ];
+  for (const [name, sort, want] of cases) {
+    const handler = getFind();
+    const calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(ORDER_FIXTURE) } }));
+    await handler({ structure: "Meeting", sort, fetch_cap: 3 });
+    assert.deepEqual(fetchedIds(calls), want, name);
+  }
+});
+
+test("find_objects: the plain search path keeps search-rank order (no title-date reordering)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({ search: { Sync: [
+    { id: "m1", title: "Sync - 2024-01-10", structureId: "meeting" },
+    { id: "m3", title: "Sync - 2026-03-01", structureId: "meeting" }
+  ] } }));
+  await handler({ structure: "Meeting", title_hint: "Sync", sort: SORT_DATE_DESC, fetch_cap: 1 });
+  assert.deepEqual(fetchedIds(calls), ["m1"]);
+});
+
+test("find_objects: no filters and no sort → ZERO GET /object, most recent first, row cap = limit (default 30) with a Note", async () => {
+  const dated = summaries(1, 40, n => `Sync - ${new Date(Date.UTC(2025, 0, n)).toISOString().slice(0, 10)}`);
+  let handler = getFind();
+  let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(dated) } }));
+  let res = await handler({ structure: "Meeting" });
+  assert.deepEqual(fetchedIds(calls), [], "nothing to surface, so nothing is fetched");
+  let text = res.content[0].text;
+  assert.match(text, /^Found 30 Meetings \(live as of /);
+  assert.equal(text.match(/^ID: (\S+)$/m)![1], uid(40), "the newest title date is listed first");
+  assert.match(text, /^Note: showing the first 30 of 40 matching Meetings \(limit\) — raise limit or narrow the seed\.$/m);
+  assert.equal(res.structuredContent.candidates_complete, false);
+  assert.equal(res.structuredContent.returned, 30);
+
+  // limit governs the cap; a cap that does not bite is complete.
+  handler = getFind();
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(dated) } }));
+  res = await handler({ structure: "Meeting", limit: 100 });
+  text = res.content[0].text;
+  assert.match(text, /^Found 40 Meetings/);
+  assert.doesNotMatch(text, /^[ \t]*Note:/im);
+  assert.equal(res.structuredContent.candidates_complete, true);
+
+  // Known-positive: with a sort, stage 2 runs and the GET channel is live.
+  handler = getFind();
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(dated) } }));
+  await handler({ structure: "Meeting", sort: SORT_DATE_DESC });
+  assert.equal(fetchedIds(calls).length, 30);
+});
+
+test("find_objects: a tag-only listing with no filters is zero-GET (design Example C)", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf(summaries(1, 19, n => `Pricing ${n}`)) }
+  }));
+  const res = await handler({ structure: "Meeting", tag: "product" });
+  assert.deepEqual(fetchedIds(calls), []);
+  assert.match(res.content[0].text, /^Found 19 Meetings tagged "product"/);
+});
+
+test("find_objects: when truncation left filters a SAMPLE, an empty result says so", async () => {
+  const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  let handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, filters: { Status: "Done" } });
+  assert.match(res.content[0].text, /^\(none of the 2 fetched candidates matched the filters — 3 were not fetched\)$/m);
+  assert.doesNotMatch(res.content[0].text, /^\(no candidates matched the filters\)$/m);
+  // Known-positive: everything fetched → the plain wording.
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  res = await handler({ structure: "Meeting", title_hint: "Note", filters: { Status: "Done" } });
+  assert.match(res.content[0].text, /^\(no candidates matched the filters\)$/m);
+});
+
+test("find_objects: the extremum caveat appears iff a sorted result was truncated, and is never a Note", async () => {
+  const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  const caveat = /^\(Sorted within the 2 fetched candidates only — the true first\/last by Date may lie among the 3 candidates not fetched\.\)$/m;
+  let handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: SORT_DATE_DESC });
+  assert.match(res.content[0].text, caveat);
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });      // not truncated
+  assert.doesNotMatch(res.content[0].text, /may lie among/);
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, filters: { Status: "Done" } }); // truncated, no sort
+  assert.doesNotMatch(res.content[0].text, /may lie among/);
+});
+
+test("find_objects: a stage-2 limit slice is informational, not a Note, keeps candidates_complete true, and shows as matched 3 vs returned 1 (D3)", async () => {
+  const handler = getFind();
+  const three = [1, 2, 3].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  installFind(findRouter({ search: { Note: three } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC, limit: 1 });
+  assert.match(res.content[0].text, /^\(showing 1 of 3 matches — limit\)$/m);
+  assert.doesNotMatch(res.content[0].text, /^[ \t]*Note:/im);
+  assert.equal(res.structuredContent.candidates_complete, true);
+  assert.equal(res.structuredContent.matched, 3, "matches after filtering, BEFORE the limit slice");
+  assert.equal(res.structuredContent.returned, 1);
+});
+
+test("find_objects: when titles carry no dates and rows were cut, an info line says the kept rows are in listing order (design § Stage 2 (b))", async () => {
+  const undated = summaries(1, 40, n => `Task ${n}`);
+  const line = /^\(None of the 40 candidate titles carries a date, so the (\d+) kept were taken in listing order, not by date\.\)$/m;
+  // Short-circuit cut at the default row cap.
+  let handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(undated) } }));
+  let text = (await handler({ structure: "Meeting" })).content[0].text;
+  assert.equal(text.match(line)?.[1], "30");
+  // Stage-2 cut at fetch_cap.
+  handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(undated) } }));
+  text = (await handler({ structure: "Meeting", sort: SORT_DATE_DESC, fetch_cap: 5 })).content[0].text;
+  assert.equal(text.match(line)?.[1], "5");
+  // Known-negatives: nothing cut → no line; dated titles cut → no line.
+  handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(undated) } }));
+  assert.doesNotMatch((await handler({ structure: "Meeting", limit: 100 })).content[0].text, /carries a date/);
+  handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(summaries(1, 40, n => `Sync - ${new Date(Date.UTC(2025, 0, n)).toISOString().slice(0, 10)}`)) } }));
+  assert.doesNotMatch((await handler({ structure: "Meeting" })).content[0].text, /carries a date/);
+});
+
+test("find_objects: the undated listing-order line needs EVERY title undated — one dated title among 40 silences it on both cut surfaces", async () => {
+  // 39 undated + 1 dated: a gate that fires when SOME title is undated would emit the line here.
+  const mixed = [...summaries(1, 39, n => `Task ${n}`), { id: uid(40), title: "Sync - 2025-01-05", structureId: "meeting" }];
+  // Short-circuit cut (default row cap 30). The Note proves the rows WERE cut.
+  let handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(mixed) } }));
+  let text = (await handler({ structure: "Meeting" })).content[0].text;
+  assert.match(text, /^Note: showing the first 30 of 40 /m);
+  assert.doesNotMatch(text, /carries a date/);
+  // Stage-2 cut at fetch_cap.
+  handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(mixed) } }));
+  text = (await handler({ structure: "Meeting", sort: SORT_DATE_DESC, fetch_cap: 5 })).content[0].text;
+  assert.match(text, /^Note: fetched the first 5 of 40 candidates/m);
+  assert.doesNotMatch(text, /carries a date/);
+});
+
+test("find_objects: the undated listing-order line never appears on the plain title-search path (search-rank order), cut on either surface", async () => {
+  const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  // Short-circuit cut by limit. The Note proves the rows WERE cut.
+  let handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Note", limit: 2 });
+  assert.equal(res.structuredContent.seed_method, "search");
+  assert.match(res.content[0].text, /^Note: showing the first 2 of 5 matching Meetings/m);
+  assert.doesNotMatch(res.content[0].text, /carries a date/);
+  // Stage-2 cut by fetch_cap.
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five } }));
+  res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC, fetch_cap: 2 });
+  assert.match(res.content[0].text, /^Note: fetched the first 2 of 5 candidates \(fetch_cap\) in search-rank order/m);
+  assert.doesNotMatch(res.content[0].text, /carries a date/);
 });
