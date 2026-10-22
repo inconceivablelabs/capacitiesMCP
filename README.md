@@ -70,14 +70,15 @@ docker run -d \
 ```
 
 The image is based on `node:22-slim`. Its runtime stage installs only `server/`'s production
-dependencies and the compiled output, with no source or dev dependencies.
+dependencies and the compiled output, with no source or dev dependencies. Since 2.2.3 it also
+removes the base image's bundled `npm`/`npx`, which the server never runs.
 
 ## Available tools
 
 | Tool | Description |
 |------|-------------|
 | `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`). When Capacities has semantic search enabled, objects related by meaning are also returned, listed after the title matches under a "Related by meaning" label; `limit` caps the combined list |
-| `find_objects` | Locate objects of one type by a property the API can't search on — date, label/status, tag/relation, or scalar. Seed by title (`title_hint`; results limited to titles containing it), by `tag`, both, or neither, which lists the whole type (paged, `page_budget` up to 25 pages of 100). A title search that returns 50 results lists the whole type instead. Listed candidates are taken newest first by the date in their title (oldest first when sorting ascending on a date; undated titles last either way). Filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). With no filters or sort it lists matches without reading each object. Dates are absolute ISO: a date-only value matches that day, a full timestamp that exact instant, or an `{after,before}` range. A `Note:` line means the result may be incomplete |
+| `find_objects` | Locate objects of one type by a property the API can't search on — date, label/status, tag/relation, or scalar. Seed by title (`title_hint`; results limited to titles containing it), by `tag`, both, or neither, which lists the whole type (paged, `page_budget` up to 25 pages of 100). A title search that returns 50 results lists the whole type instead. Listed candidates are taken newest first by the date in their title (oldest first when sorting ascending on a date; undated titles last either way). Filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). With no filters or sort it lists matches without reading each object. Dates are absolute ISO and must start with a real `YYYY-MM-DD`: a date-only value matches that day, a full timestamp that exact instant, or an `{after,before}` range. Reading objects stops early on a 403 or 401, or after 3 read errors with no success between them, rather than continuing against a server that is refusing it. A `Note:` line means the result may be incomplete |
 | `list_spaces` | Show the space your API token is scoped to |
 | `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
@@ -148,6 +149,13 @@ object reads) pace themselves against it. A `find_objects` listing does not wait
 it stops as a partial, with a `Note:` line saying so. That limiter is best-effort: it cannot see other clients using the same
 token or network. **If a tool returns `RATE_LIMIT_EXCEEDED`, wait and retry** rather than trying
 to predict the window.
+
+The API sits behind Cloudflare, so a server-side rejection can arrive as a Cloudflare "you are
+being rate limited" page. The one we have captured came on a 429; the server also treats the same
+page on a 403 as a rate limit, in case a ban arrives that way. Both are reported as
+`RATE_LIMIT_EXCEEDED`. Such a ban is per IP address, so it affects every client on the same network
+for as long as it lasts. Error messages carry the server's response trimmed to fit: a JSON error is
+kept whole so the model can correct its call, and an HTML page is cut to its first line.
 
 ## Why this server?
 
@@ -230,6 +238,10 @@ session (initialize, `tools/list`, `tools/call`, `resources/list`):
 | `proxy-addr`, `qs` (via Express) | No | No. |
 | `hono` | No | No. |
 | `ip-address` (via `express-rate-limit`) | No | No. |
+
+Image scanners also used to flag `ip-address` 10.1.0 inside the npm CLI bundled with the
+`node:22-slim` base image. That copy is in no lockfile, so Dependabot cannot see it, and the server
+never runs npm. Since 2.2.3 the runtime image no longer contains npm at all.
 
 ## License
 
