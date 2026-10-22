@@ -138,3 +138,13 @@ test("neutraliseCountPhrase: no \"checked … candidates\" span of 40 characters
   // Text around the phrase is kept.
   assert.equal(neutraliseCountPhrase("before checked 1 of 2 candidates after"), "before [count phrase removed] after");
 });
+
+// --- cap-dnf delta D3: no Unicode normalisation of the shown text -----------
+// NFKC rewrote JSON bodies (fullwidth quote U+FF02 → ASCII ", making the shown
+// JSON invalid; ligatures expanded). The message must carry the body as sent.
+
+test("errorBodyText: a JSON body with a fullwidth quote and a ligature inside strings survives byte-identical (D3)", () => {
+  const json = JSON.stringify({ error: "bad value ＂x＂", hint: "use the ﬁeld id" });
+  assert.ok(isJsonDocument(json), "fixture takes the JSON path");
+  assert.equal(errorBodyText(json), json);
+});

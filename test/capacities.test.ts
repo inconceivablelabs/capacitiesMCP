@@ -840,3 +840,10 @@ test("makeRequest: ban wording past the first 8 KB of a 403 body is not sniffed 
   installFetch(() => makeResponse({ ok: false, status: 403, text: "<html>\n" + "x".repeat(7000) + " banned you temporarily" }));
   assert.equal((await rejectionOf(newClient().getSpaces())).code, "RATE_LIMIT_EXCEEDED", "control: within 8 KB still classifies");
 });
+
+test("makeRequest: a JSON 400 with U+FF02 inside a string reaches the message byte-identical (D3)", async () => {
+  const json = JSON.stringify({ error: "cap_invalid_input", message: "unexpected ＂ in title" });
+  installFetch(() => makeResponse({ ok: false, status: 400, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.message, `API error 400: ${json}`);
+});
