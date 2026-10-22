@@ -189,7 +189,7 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
 
 // === find_objects tool (mocked fetch, node --test) =========================
 
-import { setupFindTools, PAGE_BUDGET_MAX, MAX_REQUESTS_PER_CALL } from "../src/tools/find.js";
+import { setupFindTools, PAGE_BUDGET_MAX, PAGE_BUDGET_DEFAULT, MAX_REQUESTS_PER_CALL } from "../src/tools/find.js";
 
 interface FCall { url: string; opts: any; }
 function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
@@ -1344,12 +1344,12 @@ test("find_objects: the undated listing-order line needs EVERY title undated —
 
 test("find_objects: the undated listing-order line never appears on the plain title-search path (search-rank order), cut on either surface", async () => {
   const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
-  // Short-circuit cut by limit. The Note proves the rows WERE cut.
+  // Short-circuit cut by a caller limit. The limit info line proves the rows WERE cut.
   let handler = getFind();
   installFind(findRouter({ search: { Note: five } }));
   let res = await handler({ structure: "Meeting", title_hint: "Note", limit: 2 });
   assert.equal(res.structuredContent.seed_method, "search");
-  assert.match(res.content[0].text, /^Note: showing the first 2 of 5 matching Meetings/m);
+  assert.match(res.content[0].text, /^\(showing 2 of 5 matches — limit\)$/m);
   assert.doesNotMatch(res.content[0].text, /carries a date/);
   // Stage-2 cut by fetch_cap.
   handler = getFind();
@@ -1576,7 +1576,10 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
       res: await run({ title_hint: "Weekly Review", sort: SORT_DATE_DESC, limit: 1 },
         { base: { search: { "Weekly Review": [mixed[0], { id: "m2", title: "Weekly Review", structureId: "meeting" }] } } }) },
     { name: "filters matched none, every candidate read", marker: /\(no candidates matched the filters\)$/m,
-      res: await run({ title_hint: "Note", filters: { Status: "Done" } }, { base: { search: { Note: five } } }) }
+      res: await run({ title_hint: "Note", filters: { Status: "Done" } }, { base: { search: { Note: five } } }) },
+    // A caller's limit is what they asked for on the zero-GET path too (D3, final-review I2).
+    { name: "short-circuit caller limit slice (info line)", marker: /^\(showing 2 of 3 matches — limit\)$/m,
+      res: await run({ limit: 2 }, { structurePages: { meeting: pagesOf(forty.slice(0, 3)) } }) }
   ];
   // The fidelity canary (U4) fires on stderr only — it must never reach the text.
   const canarySearch = [...summaries(1, 20, n => `Retro ${n}`), { id: uid(5000), title: "Retro 5000", structureId: "meeting" },
@@ -1710,5 +1713,162 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
   const canaryRow = complete[complete.length - 1];
   assert.equal(canaryRow.stderr!.length, 1, "the canary fired");
   assert.match(canaryRow.stderr![0], new RegExp(`fidelity canary: 1 .*${uid(5000)}`));
-  assert.doesNotMatch(canaryRow.res.content[0].text, /canary|5000/, "the canary stays out of the tool text");
+  assert.doesNotMatch(canaryRow.res.content[0].text, /canary/, "the canary stays out of the tool text");
+  // The hit the listing missed is still returned (final-review I1), as an ordinary row.
+  assert.match(canaryRow.res.content[0].text, new RegExp(`^ID: ${uid(5000)}$`, "m"));
+});
+
+// === cap-i93 final-review fixes =============================================
+
+// 45 title hits sorting LATE in id order, behind 250 unrelated rows, plus 5
+// semantic extras: the search saturates (50 raw) and escalates, and a partial
+// listing reads none of the hits (final-review I1, probe p1).
+const WEEKLY = summaries(5001, 5045, n => `Weekly Sync ${n - 5000}`);
+const WEEKLY_SEARCH = [...WEEKLY, ...summaries(6001, 6005, n => `Planning ${n}`)];
+const WEEKLY_LISTING = [...summaries(1, 250, n => `Standup ${n}`), ...WEEKLY];
+const WEEKLY_PARTIALS: [string, any, PageSpec[], RegExp][] = [
+  ["page budget", { page_budget: 2 }, pagesOf(WEEKLY_LISTING), /^Note: listing stopped at the page budget — read 2 pages \(200 summaries\)/m],
+  ["429 on listing page 1", {}, [{ fail: { status: 429, text: "<!doctype html>banned" } }], /^Note: rate limit reached while listing — read 0 page\(s\)/m]
+];
+
+test("find_objects: a PARTIAL escalation still returns every title match its own search found (I1) — page budget and a page-1 429", async () => {
+  for (const [name, extra, pages, note] of WEEKLY_PARTIALS) {
+    const handler = getFind();
+    installFind(enumRouter({ base: { search: { "Weekly Sync": WEEKLY_SEARCH } }, structurePages: { meeting: pages } }));
+    const res = await handler({ structure: "Meeting", title_hint: "Weekly Sync", limit: 100, ...extra });
+    assert.equal(res.isError, undefined, name);
+    const text = res.content[0].text;
+    // Precondition: no hit came from the listing, so every one shown came from the search.
+    assert.ok(!text.includes("Standup"), `${name}: fixture: the listing read no title match`);
+    assert.match(text, /^Found 45 Meetings matching "Weekly Sync"/m, name);
+    for (const w of WEEKLY) assert.ok(text.includes(`ID: ${w.id}`), `${name}: ${w.title} returned`);
+    assert.ok(!text.includes(uid(6001)), `${name}: a semantic extra is still not a candidate`);
+    assert.match(text, note, `${name}: the stage-1 Note stays`);
+    assert.equal(res.structuredContent.seed_method, "search+enumeration", name);
+    assert.equal(res.structuredContent.seed_complete, false, `${name}: the listing really was partial`);
+    assert.equal(res.structuredContent.seed_size, 45, `${name}: seed_size counts the union`);
+  }
+});
+
+test("find_objects: a PARTIAL escalation with a sort GETs the search's title matches in stage 2 (I1)", async () => {
+  const want = new Set(WEEKLY.map(w => w.id));
+  for (const [name, extra, pages, note] of WEEKLY_PARTIALS) {
+    // Fake clock: 30 GETs equals the object window.
+    const handler = getFind(fakeClock());
+    const calls = installFind(enumRouter({ base: { search: { "Weekly Sync": WEEKLY_SEARCH } }, structurePages: { meeting: pages } }));
+    const res = await handler({ structure: "Meeting", title_hint: "Weekly Sync", sort: SORT_DATE_DESC, ...extra });
+    assert.equal(res.isError, undefined, name);
+    const got = fetchedIds(calls);
+    assert.equal(got.length, 30, `${name}: fetch_cap default`);
+    assert.ok(got.every(id => want.has(id)), `${name}: every GET is a search title match`);
+    assert.match(res.content[0].text, note, name);
+    assert.match(res.content[0].text, /^Note: fetched the first 30 of 45 candidates \(fetch_cap\)/m, name);
+    assert.equal(res.structuredContent.seed_size, 45, name);
+  }
+});
+
+test("find_objects: a COMPLETE listing missing a search title match still returns it, deduped, and the canary still reports it (I1)", async () => {
+  // 21 title matches (Retro 1..20 + Retro 5000) + 29 extras = 50 raw → escalates.
+  const search = [...summaries(1, 20, n => `Retro ${n}`), { id: uid(5000), title: "Retro 5000", structureId: "meeting" },
+    ...summaries(1001, 1029, n => `Planning ${n}`)];
+  const listing = [...summaries(1, 25, n => `Retro ${n}`), ...summaries(26, 35, n => `Other ${n}`)];
+  const handler = getFind();
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const r = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" }));
+  const text = r.value.content[0].text;
+  assert.equal(r.value.structuredContent.seed_complete, true);
+  assert.ok(text.includes(`ID: ${uid(5000)}`), "the hit the listing missed is returned");
+  // 25 listed + 1 search-only: Retro 1..20 sit in both and are counted once.
+  assert.equal(r.value.structuredContent.seed_size, 26);
+  assert.match(text, /^Found 26 Meetings matching "Retro"/m);
+  assert.equal(r.lines.length, 1, "the canary still reports the disagreement");
+  assert.match(r.lines[0], new RegExp(`fidelity canary: 1 .*${uid(5000)}`));
+  assert.doesNotMatch(text, /^[ \t]*Note:/im);
+});
+
+test("find_objects: a caller limit on the zero-GET path gives the SAME completeness signals as with a sort (I2, D3)", async () => {
+  const three = summaries(1, 3, n => `Kickoff ${n}`);
+  const signals: Record<string, any> = {};
+  for (const [name, extra] of [["no sort", {}], ["sort Title", { sort: { by: "Title", order: "asc" } }]] as [string, any][]) {
+    const handler = getFind();
+    const calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(three) } }));
+    const res = await handler({ structure: "Meeting", limit: 2, ...extra });
+    assert.equal(res.isError, undefined, name);
+    const text = res.content[0].text;
+    // Precondition: the two calls really took the two paths.
+    assert.equal(fetchedIds(calls).length, name === "no sort" ? 0 : 3, `${name}: path taken`);
+    const sc = res.structuredContent;
+    signals[name] = {
+      notes: noteLines(text), limitLine: /^\(showing 2 of 3 matches — limit\)$/m.test(text),
+      seed_complete: sc.seed_complete, candidates_complete: sc.candidates_complete, matched: sc.matched, returned: sc.returned
+    };
+  }
+  const want = { notes: [], limitLine: true, seed_complete: true, candidates_complete: true, matched: 3, returned: 2 };
+  assert.deepEqual(signals, { "no sort": want, "sort Title": want });
+
+  // Known-positive: the DEFAULT row cap is a real "you did not see everything".
+  const handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf(summaries(1, 40, n => `Kickoff ${n}`)) } }));
+  const res = await handler({ structure: "Meeting" });
+  assert.match(res.content[0].text, /^Note: showing the first 30 of 40 matching Meetings \(limit\)/m);
+  assert.doesNotMatch(res.content[0].text, /^\(showing \d+ of \d+ matches — limit\)$/m);
+  assert.equal(res.structuredContent.candidates_complete, false);
+});
+
+test("find_objects: the page-budget Note offers raising page_budget only below its maximum (M1)", async () => {
+  const big = summaries(1, 2600, n => `Sync ${n}`);   // 26 pages
+  let handler = getFind();
+  let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
+  let text = (await handler({ structure: "Meeting", page_budget: PAGE_BUDGET_MAX })).content[0].text;
+  assert.equal(enumCalls(calls).length, PAGE_BUDGET_MAX, "fixture: stopped at the maximum, not clamped");
+  assert.match(text, /^Note: listing stopped at the page budget — read 25 pages \(2500 summaries\) and more remain; results may be incomplete\. Narrow the seed \(title_hint or tag\)\.$/m);
+  assert.doesNotMatch(text, /raise page_budget/);
+  // Known-positive: below the maximum the advice stands.
+  handler = getFind();
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
+  text = (await handler({ structure: "Meeting", page_budget: 2 })).content[0].text;
+  assert.match(text, /Narrow the seed \(title_hint or tag\) or raise page_budget \(max 25\)\.$/m);
+});
+
+test("find_objects: a direct call with a non-finite page_budget or fetch_cap gets the default, not an unbounded run (M2)", async () => {
+  const big = summaries(1, 2000, n => `Sync ${n}`);   // 20 pages
+  // NaN page_budget, short-circuit: the default 12 pages.
+  let handler = getFind();
+  let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
+  let res = await handler({ structure: "Meeting", page_budget: NaN });
+  assert.equal(enumCalls(calls).length, PAGE_BUDGET_DEFAULT);
+  assert.equal(res.structuredContent.seed_complete, false);
+
+  // NaN fetch_cap with a sort: NaN would poison the fetch reserve (pages) and the
+  // fetch plan (zero GETs); the default 30 gives 45 - 1 - 30 = 14 pages and 30 GETs.
+  const clock = fakeClock();
+  handler = getFind(clock);
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
+  res = await handler({ structure: "Meeting", sort: SORT_DATE_DESC, page_budget: 25, fetch_cap: NaN });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 14);
+  assert.equal(fetchedIds(calls).length, 30);
+  assert.ok(calls.length <= MAX_REQUESTS_PER_CALL);
+});
+
+// Copied from personal-assistant scripts/backfill_meeting_titles.py:125 (_ENTRY_RE), verified at 146a349.
+const PA_ENTRY_RE = /^\*\*(?<title>.*?)\*\*[ \t]*\r?\n[ \t]*ID:[ \t]*(?<id>\S+)[ \t]*\r?\n(?:[ \t]*Date:[ \t]*(?<date>[^\r\n]*)\r?\n)?/gm;
+const paEntries = (t: string) => [...(t.endsWith("\n") ? t : t + "\n").matchAll(PA_ENTRY_RE)].map(m => ({ title: m.groups!.title.trim(), id: m.groups!.id }));
+
+test("find_objects: a null or empty title renders as (untitled) on both row renderers, and PA still parses the entry (M4)", async () => {
+  const rows: any[] = [
+    { id: uid(1), title: null, structureId: "meeting" },
+    { id: uid(2), title: "", structureId: "meeting" },
+    { id: uid(3), title: "Kickoff", structureId: "meeting" }
+  ];
+  for (const [name, extra] of [["short-circuit", {}], ["stage 2", { sort: { by: "Title", order: "asc" } }]] as [string, any][]) {
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: pagesOf(rows) } }));
+    const text = (await handler({ structure: "Meeting", ...extra })).content[0].text;
+    assert.doesNotMatch(text, /\*\*null\*\*|\*\*\*\*/, name);
+    const entries = paEntries(text);
+    assert.deepEqual(entries.map(e => e.id).sort(), [uid(1), uid(2), uid(3)], `${name}: PA parses every entry`);
+    for (const id of [uid(1), uid(2)]) assert.equal(entries.find(e => e.id === id)!.title, "(untitled)", `${name}: ${id}`);
+    assert.equal(entries.find(e => e.id === uid(3))!.title, "Kickoff", `${name}: a real title is untouched`);
+  }
 });

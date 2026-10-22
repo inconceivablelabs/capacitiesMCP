@@ -34,6 +34,8 @@ import { parseTitleDate, orderEnumerated } from "../utils/title-date.js";
 
 export const PAGE_BUDGET_DEFAULT = 12;
 export const PAGE_BUDGET_MAX = 25;
+export const FETCH_CAP_DEFAULT = 30;
+export const FETCH_CAP_MAX = 50;
 export const TITLE_HINT_MAX = 512;           // spec: /objects/search query maxLength
 // Every request an ENUMERATING call makes (space read, relation searches, seed
 // search, listing pages, GETs) fits this per-call budget; a plain title search
@@ -72,6 +74,20 @@ function briefError(message: string | undefined): string {
   return first.length > ERROR_DETAIL_MAX ? first.slice(0, ERROR_DETAIL_MAX) + "…" : first;
 }
 
+// zod's bounds and defaults are applied by the MCP SDK's input parse, NOT on a
+// direct handler call (A11). NaN slips through Math.min/Math.max and disables the
+// bound, so anything non-finite gets the default.
+function clampCount(v: number | undefined, def: number, max: number): number {
+  if (v === undefined || !Number.isFinite(v)) return def;
+  return Math.min(Math.max(Math.floor(v), 1), max);
+}
+
+// Both row renderers: a listing row may carry a null or empty title, which would
+// otherwise render as **null** or an empty ****.
+function displayTitle(title: string | null | undefined): string {
+  return typeof title === "string" && title.trim() !== "" ? title : "(untitled)";
+}
+
 // "1 candidate" / "2 candidates" for the sampling body and the extremum caveat.
 function candidatesPhrase(n: number): string {
   return `${n} candidate${n === 1 ? "" : "s"}`;
@@ -80,7 +96,8 @@ function candidatesPhrase(n: number): string {
 // Stage-1 Note for an incomplete listing. Never uses stage 2's "checked N of M
 // candidates" phrase: personal-assistant's backfill keys on it (U6).
 // `requestedPages` is the caller's page_budget; when the request budget clamped it
-// below that, raising page_budget would not help, so the Note says so instead.
+// below that, raising page_budget would not help, so the Note says so instead. At
+// the maximum there is nothing to raise, so that advice is dropped too.
 function enumerationNote(e: EnumerationResult, requestedPages: number, effectivePages: number): string | null {
   if (e.complete) return null;
   switch (e.stopReason) {
@@ -90,7 +107,8 @@ function enumerationNote(e: EnumerationResult, requestedPages: number, effective
           `read ${e.results.length} summaries and more remain; results may be incomplete. Narrow the seed (title_hint or tag).`;
       }
       return `Note: listing stopped at the page budget — read ${e.pagesRead} pages (${e.results.length} summaries) and more remain; ` +
-        `results may be incomplete. Narrow the seed (title_hint or tag) or raise page_budget (max ${PAGE_BUDGET_MAX}).`;
+        `results may be incomplete. Narrow the seed (title_hint or tag)` +
+        (requestedPages < PAGE_BUDGET_MAX ? ` or raise page_budget (max ${PAGE_BUDGET_MAX}).` : ".");
     case "rate-limit":
       return `Note: rate limit reached while listing — read ${e.pagesRead} page(s) before stopping; results may be incomplete (retry shortly).`;
     case "no-cursor":
@@ -504,7 +522,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           order: z.enum(["asc", "desc"]).default("asc")
         }).optional().describe("Sort by a property; missing values sort last"),
         limit: z.number().int().positive().optional().describe("Max results to return after filtering"),
-        fetch_cap: z.number().int().min(1).max(50).default(30).describe(
+        fetch_cap: z.number().int().min(1).max(FETCH_CAP_MAX).default(FETCH_CAP_DEFAULT).describe(
           "Max candidates to fetch in stage 2 (default 30 fits one rate window; max 50 may add one ~60s wait). A call that lists gets what is left of its 45-request budget."
         ),
         page_budget: z.number().int().min(1).max(PAGE_BUDGET_MAX).default(PAGE_BUDGET_DEFAULT).describe(
@@ -530,9 +548,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         if (tag !== undefined && tag.length > TITLE_HINT_MAX) {
           return { content: [{ type: "text", text: `tag is ${tag.length} characters; the maximum is ${TITLE_HINT_MAX}.` }], isError: true };
         }
-        // zod's bounds and default are applied by the MCP SDK's input parse, NOT on a
-        // direct handler call, so clamp here too (A11).
-        const pageBudget = Math.min(Math.max(page_budget ?? PAGE_BUDGET_DEFAULT, 1), PAGE_BUDGET_MAX);
+        const pageBudget = clampCount(page_budget, PAGE_BUDGET_DEFAULT, PAGE_BUDGET_MAX);
 
         // 1. Resolve the structure (space bucket — one call, reused).
         const { structures } = await client.getSpaceInfo();
@@ -585,7 +601,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         // Per-call request budget (D5: only a call that lists). Requests already
         // spent: the structure read plus one search per relation filter; the seed
         // or tag search is added on the path that makes it.
-        const cap = fetch_cap ?? 30;
+        const cap = clampCount(fetch_cap, FETCH_CAP_DEFAULT, FETCH_CAP_MAX);
         const shortCircuit = compiled.length === 0 && !compiledSort;
         const fetchReserve = shortCircuit ? 0 : Math.min(cap, FETCH_RESERVE_MAX);
         let spentBeforeEnumeration = 1 + compiled.filter(c => c.kind === "entity-equals").length;
@@ -620,13 +636,24 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             effectivePages = budgetedPages();
             const listing = await enumerateAll(client, "structure", struct.id, effectivePages);
             enumeration = listing;
-            candidates = listing.results.filter(r => r.structureId === struct.id && matchesTitle(r.title, title_hint));
+            const listed = listing.results.filter(r => r.structureId === struct.id && matchesTitle(r.title, title_hint));
+            // Never return less than the search already found (final-review I1): a
+            // partial listing is a sample in id order and can miss every search hit,
+            // and a complete one can still miss some (the canary's case). Listing rows
+            // first, then the search's title matches the listing lacks; the ordering
+            // below sorts the union.
+            const seen = new Set(listed.map(r => r.id));
+            candidates = [...listed];
+            for (const h of titleSeed) {
+              if (!seen.has(h.id)) { seen.add(h.id); candidates.push(h); }
+            }
             seedMethod = "search+enumeration";
             seedComplete = listing.complete;
             infoLines.push(`(The title search returned its ${SEARCH_LIMIT}-result maximum, so the ${plural} were listed instead: ${listing.pagesRead} page(s), ${listing.results.length} summaries.)`);
             const note = enumerationNote(listing, pageBudget, effectivePages);
             if (note) stage1Notes.push(note);
-            if (listing.complete) logFidelityCanary(struct.id, titleSeed, candidates);
+            // Judged against the listing alone: the union above always contains every hit.
+            if (listing.complete) logFidelityCanary(struct.id, titleSeed, listed);
           }
         } else {
           let listing: EnumerationResult;
@@ -698,20 +725,26 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         if (shortCircuit) {
           const rows = candidates.slice(0, limit ?? 30);
           const info = [...infoLines];
+          const notes = [...stage1Notes];
+          // Only the DEFAULT row cap hides rows the caller did not ask to lose. A
+          // caller's limit is what they asked for: the same informational line as
+          // stage 2, with the slice carried by matched vs returned (D3).
+          const defaultCapCut = limit === undefined && rows.length < seedSize;
+          if (defaultCapCut) {
+            notes.push(`Note: showing the first ${rows.length} of ${seedSize} matching ${plural} (limit) — raise limit or narrow the seed.`);
+          } else if (rows.length < seedSize) {
+            info.push(`(showing ${rows.length} of ${seedSize} matches — limit)`);
+          }
           const undated = undatedLine(rows.length);
           if (undated) info.push(undated);
-          const notes = [...stage1Notes];
-          if (rows.length < seedSize) {
-            notes.push(`Note: showing the first ${rows.length} of ${seedSize} matching ${plural} (limit) — raise limit or narrow the seed.`);
-          }
           const trailer = [...info, ...notes];
           const body = rows.length
-            ? rows.map(r => `**${r.title}**\nID: ${r.id}`).join("\n---\n")
+            ? rows.map(r => `**${displayTitle(r.title)}**\nID: ${r.id}`).join("\n---\n")
             : `(no matching ${plural} in the part of the listing that was read)`;
           const exactness: FindExactness = {
             seed_method: seedMethod,
             seed_complete: seedComplete,
-            candidates_complete: rows.length === seedSize,
+            candidates_complete: !defaultCapCut,
             seed_size: seedSize,
             considered: seedSize,
             errored: 0,
@@ -772,7 +805,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         if (compiledSort && !surfaceProps.some(s => s.id === compiledSort.propId)) surfaceProps.push({ id: compiledSort.propId, name: compiledSort.propName });
 
         const blocks = matches.map(m => {
-          const lines = [`**${m.title}**`, `ID: ${m.id}`];
+          const lines = [`**${displayTitle(m.title)}**`, `ID: ${m.id}`];
           for (const s of surfaceProps) lines.push(`${s.name}: ${surfaceValue(m.props[s.id])}`);
           return lines.join("\n");
         });
