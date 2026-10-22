@@ -5,7 +5,8 @@
 // API itself cannot express:
 //   stage 1  seed:   POST /objects/search scoped to one structure, then kept to
 //                    titles containing title_hint (the search also returns
-//                    matches by meaning — cap-1kc)
+//                    matches by meaning — cap-1kc); a search that returns its
+//                    50-result maximum escalates to listing the structure (cap-i93)
 //   stage 2  fetch:  GET /object (JSON) per candidate, paced by a WaitBudget
 //   stage 3  filter + sort client-side over the typed property values
 // It returns ids + titles + the surfaced (filtered/sorted) property values and NO
@@ -76,6 +77,26 @@ function enumerationNote(e: EnumerationResult): string | null {
     default:
       return `Note: listing stopped after ${e.pagesRead} page(s) because a page could not be read (${briefError(e.errorMessage)}); results may be incomplete.`;
   }
+}
+
+// U4 fidelity canary. Every title-matching search hit should appear in a COMPLETED
+// listing of the same structure; one that does not means the listing missed rows
+// (design A2) or the two endpoints disagree. Only a completed listing is evidence —
+// a partial one lacks rows by construction — so callers gate on `complete`. One
+// stderr line, ids only (titles stay out of gateway logs, D6). Never console.log:
+// stdout is the stdio MCP channel. It never adds a Note and never fails the call.
+function logFidelityCanary(
+  structureId: string,
+  titleSeed: { id: string }[],
+  candidates: { id: string }[]
+): void {
+  const candidateIds = new Set(candidates.map(c => c.id));
+  const missing = titleSeed.filter(h => !candidateIds.has(h.id));
+  if (missing.length === 0) return;
+  console.error(
+    `[find_objects] fidelity canary: ${missing.length} title-matching search hit(s) absent from the completed listing of ${structureId}: ` +
+    missing.map(h => h.id).join(", ")
+  );
 }
 
 /** Tag NAME → tag id, strictly: anything but one exact, spec-valid match is a problem. */
@@ -525,34 +546,32 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
             budget
           );
-          // Truncation is a property of the RAW search: at the cap, a title match
-          // may sit beyond it whatever the filter below keeps.
-          const seedTruncated = seed.length >= SEARCH_LIMIT;
           // cap-1kc: the search also returns objects related BY MEANING, interleaved
           // by relevance — a semantic extra can be a newer dated object and win a
           // sort-desc + limit-1. Keep only title matches.
-          candidates = seed.filter(r => matchesTitle(r.title, title_hint));
-          const droppedCount = seed.length - candidates.length;
-
-          if (candidates.length === 0 && seedTruncated) {
-            const stamp = new Date().toISOString();
-            const exactness: FindExactness = {
-              seed_method: "search", seed_complete: false, candidates_complete: true,
-              seed_size: 0, considered: 0, errored: 0, matched: 0, returned: 0
-            };
-            return { content: [{ type: "text", text:
-              `None of the ${SEARCH_LIMIT} search results has a title containing "${title_hint}" (Capacities search ` +
-              `also returns matches by meaning) — a ${struct.title} with a matching title may exist beyond them; ` +
-              `narrow title_hint (live as of ${stamp}).\n\n` +
-              `Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.` }],
-              structuredContent: exactness };
-          }
-          seedMethod = "search";
-          seedComplete = !seedTruncated;
+          const titleSeed = seed.filter(r => matchesTitle(r.title, title_hint));
           header = (n, stamp) => `Found ${n} ${plural} matching "${title_hint}" (live as of ${stamp}):`;
           noneText = stamp => `No ${plural} found with a title matching "${title_hint}" (live as of ${stamp}).`;
-          if (droppedCount > 0) infoLines.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
-          if (seedTruncated) stage1Notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
+
+          // Saturation is judged on the RAW count: at the cap a title match may sit
+          // beyond it whatever the filter kept, so list the whole structure instead
+          // and filter that (cap-i93 U3/U8).
+          if (seed.length < SEARCH_LIMIT) {
+            candidates = titleSeed;
+            seedMethod = "search";
+            seedComplete = true;
+            const droppedCount = seed.length - titleSeed.length;
+            if (droppedCount > 0) infoLines.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
+          } else {
+            const listing = await enumerateAll(client, "structure", struct.id, pageBudget);
+            candidates = listing.results.filter(r => r.structureId === struct.id && matchesTitle(r.title, title_hint));
+            seedMethod = "search+enumeration";
+            seedComplete = listing.complete;
+            infoLines.push(`(The title search returned its ${SEARCH_LIMIT}-result maximum, so all ${plural} were listed instead: ${listing.pagesRead} page(s), ${listing.results.length} summaries.)`);
+            const note = enumerationNote(listing);
+            if (note) stage1Notes.push(note);
+            if (listing.complete) logFidelityCanary(struct.id, titleSeed, candidates);
+          }
         } else {
           let listing: EnumerationResult;
           if (tag !== undefined) {

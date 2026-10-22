@@ -377,20 +377,17 @@ test("find_objects: tag-equals resolves name→id (search scoped to RootTag) the
   assert.match(res.content[0].text, /ID: m1/);
 });
 
-test("find_objects: seed truncation (50 candidates) emits the narrow-the-hint note", async () => {
-  // fetch_cap:50 fetches all 50 candidates → the 31st GET crosses the 30/60s
-  // object-window boundary and acquireWithWait sleeps one window. Inject a fake
-  // clock so that sleep resolves instantly instead of a real ~60s wait.
+test("find_objects: an escalated seed of 50 with fetch_cap 50 still takes exactly one bounded window sleep", async () => {
+  // The 31st GET crosses the 30/60s object window; acquireWithWait sleeps once.
+  // Inject a fake clock so that sleep resolves instantly instead of ~60s.
   const clock = fakeClock();
   const handler = getFind(clock);
-  const fifty = Array.from({ length: 50 }, (_, i) => ({ id: `m${i}`, title: "Note", structureId: "meeting" }));
-  const objects: Record<string, any> = {};
-  for (const c of fifty) objects[c.id] = meetingObj(c.id, {});
-  installFind(findRouter({ search: { Note: fifty }, objects }));
-  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50 });
+  const fifty = summaries(1, 50, n => `Note ${n}`);
+  installFind(enumRouter({ base: { search: { Note: fifty } }, structurePages: { meeting: pagesOf(fifty) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep for the 31st fetch");
-  assert.match(res.content[0].text, /returned the maximum 50 candidates/);
+  assert.doesNotMatch(res.content[0].text, /returned the maximum 50/);
 });
 
 test("find_objects: fetch_cap below the candidate count emits the fetch-cap note", async () => {
@@ -542,21 +539,29 @@ test("find_objects: no title matches and the seed was NOT truncated → the exis
   assert.match(res.content[0].text, /No Meetings found with a title matching "Weekly Roadmap Review"/);
 });
 
-test("find_objects: no title matches but the seed WAS truncated → non-confident text, not 'No … found'", async () => {
-  const handler = getFind();
-  const fifty = Array.from({ length: 50 }, (_, i) => ({ id: `x${i}`, title: `Related Thing ${i}`, structureId: "meeting" }));
-  const calls = installFind(findRouter({ search: { Roadmap: fifty } }));
-  const res = await handler({ structure: "Meeting", title_hint: "Roadmap" });
-  assert.equal(res.isError, undefined, "a possible miss beyond the cap is not an error");
-  assert.deepEqual(fetchedIds(calls), []);
-  const text = res.content[0].text;
-  assert.doesNotMatch(text, /No Meetings found/);
-  assert.match(text, /none of the 50 search results has a title containing "Roadmap"/i);
-  assert.match(text, /may exist beyond them/);
-  assert.match(text, /narrow title_hint/);
-  // A possible miss IS incompleteness: consumers that key on "Note:" (see the
-  // dropped-count test above) must not read this as a complete, empty sweep.
-  assert.match(text, /^[ \t]*Note:/im, "a truncated empty result must carry a Note: line");
+test("find_objects: a saturated seed with ZERO title matches escalates — matches beyond the cap are found (U8/U9)", async () => {
+  const extras = summaries(1001, 1050, n => `Related Thing ${n}`);
+  const listing = [...summaries(1, 118, n => `Standup ${n}`),
+    { id: uid(119), title: "Roadmap Sync", structureId: "meeting" },
+    { id: uid(120), title: "roadmap/planning", structureId: "meeting" }];
+  let handler = getFind();
+  let calls = installFind(enumRouter({ base: { search: { Roadmap: extras } }, structurePages: { meeting: pagesOf(listing) } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Roadmap", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 2);
+  let text = res.content[0].text;
+  assert.match(text, /^Found 2 Meetings matching "Roadmap"/);
+  assert.ok(text.includes(`ID: ${uid(119)}`) && text.includes(`ID: ${uid(120)}`));
+  assert.doesNotMatch(text, /may exist beyond/);
+
+  // A COMPLETE enumeration with zero matches is a genuine none.
+  handler = getFind();
+  calls = installFind(enumRouter({ base: { search: { Roadmap: extras } }, structurePages: { meeting: pagesOf(summaries(1, 118, n => `Standup ${n}`)) } }));
+  res = await handler({ structure: "Meeting", title_hint: "Roadmap" });
+  text = res.content[0].text;
+  assert.match(text, /^No Meetings found with a title matching "Roadmap"/);
+  assert.doesNotMatch(text, /^[ \t]*Note:/im);
+  assert.equal(res.structuredContent.seed_complete, true);
 });
 
 test("find_objects: an all-punctuation title_hint is an error before any network call (U5)", async () => {
@@ -1002,4 +1007,137 @@ test("find_objects: a tag over 512 characters errors before any call; 512 passes
   assert.doesNotMatch(res.content[0].text, /the maximum is 512/);
   assert.match(res.content[0].text, /no tag named/);
   assert.equal(searchQueries(calls).length, 1, "the 512-character tag reached the tag search");
+});
+
+test("find_objects: a RAW seed of 49 does not escalate; 50 does (>=, judged before title filtering)", async () => {
+  const listing = summaries(1, 60, n => `Retro ${n}`);
+  let handler = getFind();
+  let calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 49) } }, structurePages: { meeting: pagesOf(listing) } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
+  assert.equal(enumCalls(calls).length, 0, "49 is an exact seed");
+  assert.equal(res.structuredContent.seed_method, "search");
+  assert.equal(res.structuredContent.seed_size, 49);
+
+  handler = getFind();
+  calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 50) } }, structurePages: { meeting: pagesOf(listing) } }));
+  res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
+  assert.equal(enumCalls(calls).length, 1, "50 escalates");
+  assert.equal(res.structuredContent.seed_method, "search+enumeration");
+  assert.equal(res.structuredContent.seed_size, 60);
+  assert.equal(res.structuredContent.seed_complete, true);
+});
+
+test("find_objects: a COMPLETED escalation emits no Note, says it listed instead, and drops the semantic-extras line", async () => {
+  const handler = getFind();
+  const search = [...summaries(1, 20, n => `Retro ${n}`), ...summaries(1001, 1030, n => `Planning ${n}`)]; // 50 raw, 20 title matches
+  const listing = [...summaries(1, 25, n => `Retro ${n}`), ...summaries(26, 35, n => `Other ${n}`)];
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro" });
+  assert.equal(res.isError, undefined);
+  const text = res.content[0].text;
+  assert.match(text, /^Found 25 Meetings matching "Retro"/);
+  assert.match(text, /^\(The title search returned its 50-result maximum, so all Meetings were listed instead: 1 page\(s\), 35 summaries\.\)$/m);
+  assert.doesNotMatch(text, /^[ \t]*Note:/im, "a completed escalation is complete (U8, mutation x)");
+  assert.doesNotMatch(text, /were ignored/, "the dropped-count line belongs to the search path only (U8)");
+  assert.equal(res.structuredContent.seed_complete, true);
+});
+
+test("find_objects: an escalation that hits the page budget is partial with a stage-1 Note", async () => {
+  const handler = getFind();
+  const listing = summaries(1, 250, n => `Retro ${n}`);
+  installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 50) } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 2 });
+  assert.match(res.content[0].text, /^Note: listing stopped at the page budget — read 2 pages \(200 summaries\)/m);
+  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(res.structuredContent.seed_size, 200);
+});
+
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try { return { value: await fn(), lines }; } finally { console.error = original; }
+}
+
+test("find_objects canary (U4): a completed escalation logs ONE stderr line naming every missing title-match id (ids only, no extras); a partial one logs nothing", async () => {
+  // 50 raw hits saturate the search: 20 title matches ("Retro n") + 30 semantic extras ("Planning n").
+  const search = [...summaries(1, 20, n => `Retro ${n}`), ...summaries(1001, 1030, n => `Planning ${n}`)];
+  // Completed listing holds Retro 3..25: uid(1) and uid(2) are title matches it lacks. The
+  // extras are absent from it too, but they are not title matches, so they are not missing.
+  let handler = getFind();
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(summaries(3, 25, n => `Retro ${n}`)) } }));
+  const stdout: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => { stdout.push(args.map(String).join(" ")); };
+  let done: { value: any; lines: string[] };
+  try { done = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" })); }
+  finally { console.log = originalLog; }
+  assert.equal(done.lines.length, 1, "exactly ONE canary line, however many ids are missing");
+  assert.ok(done.lines[0].includes(uid(1)) && done.lines[0].includes(uid(2)), "names every missing id");
+  assert.ok(!done.lines[0].includes(uid(1001)), "a semantic extra is not a missing title match");
+  assert.doesNotMatch(done.lines[0], /Retro|Planning/, "ids only — titles stay out of gateway logs (D6)");
+  assert.deepEqual(stdout, [], "never console.log — stdout is the MCP stdio channel (U4)");
+  assert.doesNotMatch(done.value.content[0].text, /^[ \t]*Note:/im, "the canary never adds a Note");
+  assert.equal(done.value.isError, undefined, "and never fails the call");
+
+  // Partial (page budget 1 of 2): the same gap must NOT fire.
+  handler = getFind();
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(summaries(3, 150, n => `Retro ${n}`)) } }));
+  const partial = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro", page_budget: 1 }));
+  assert.deepEqual(partial.lines, [], "an incomplete listing is not evidence of a missing id (mutation xi)");
+});
+
+test("find_objects canary (U4): silent on a rate-stopped and on an unreadable listing — only a COMPLETED listing is evidence", async () => {
+  const search = [...summaries(1, 20, n => `Retro ${n}`), ...summaries(1001, 1030, n => `Planning ${n}`)];
+  const stops: [string, PageSpec[]][] = [
+    ["429 on page 1", [{ fail: { status: 429, text: "<!doctype html>banned" } }]],
+    ["HTML 200 on page 1", [{ html: "<!doctype html><title>Just a moment</title>" }]]
+  ];
+  for (const [name, pages] of stops) {
+    const handler = getFind();
+    installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pages } }));
+    const r = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" }));
+    assert.equal(r.value.structuredContent.seed_complete, false, `${name}: the listing really was partial`);
+    assert.deepEqual(r.lines, [], `${name}: all 20 title matches look missing here, and none may be reported`);
+  }
+});
+
+test("find_objects: an ESCALATED title search whose partial listing has zero matches is partial, never 'No … found'", async () => {
+  const handler = getFind();
+  const extras = summaries(1001, 1050, n => `Related Thing ${n}`);
+  installFind(enumRouter({ base: { search: { Roadmap: extras } }, structurePages: { meeting: pagesOf(summaries(1, 150, n => `Standup ${n}`)) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Roadmap", page_budget: 1 });
+  assert.equal(res.isError, undefined);
+  const text = res.content[0].text;
+  assert.doesNotMatch(text, /No Meetings found/);
+  assert.match(text, /^Found 0 Meetings matching "Roadmap"/);
+  assert.match(text, /^\(no matching Meetings in the part of the listing that was read\)$/m);
+  assert.match(text, /^Note: listing stopped at the page budget — read 1 pages \(100 summaries\)/m);
+  assert.equal(res.structuredContent.seed_method, "search+enumeration");
+  assert.equal(res.structuredContent.seed_complete, false);
+});
+
+test("find_objects: every title-filtering path uses the shared matcher — an accented title meets an unaccented hint on all three paths (U2, QA B6)", async () => {
+  const cafe = { id: uid(7), title: "Café Review", structureId: "meeting" };
+  const found: Record<string, boolean> = {};
+  // Title-only search path.
+  let handler = getFind();
+  installFind(enumRouter({ base: { search: { cafe: [cafe] } } }));
+  let res = await handler({ structure: "Meeting", title_hint: "cafe" });
+  found.search = res.content[0].text.includes(`ID: ${uid(7)}`);
+  // Escalated path: 50 semantic extras saturate the search; only the listing holds the accented title.
+  handler = getFind();
+  installFind(enumRouter({ base: { search: { cafe: summaries(1001, 1050, n => `Espresso ${n}`) } }, structurePages: { meeting: pagesOf([cafe]) } }));
+  res = await handler({ structure: "Meeting", title_hint: "cafe" });
+  found.escalated = res.content[0].text.includes(`ID: ${uid(7)}`);
+  // tag + title path.
+  handler = getFind();
+  installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf([cafe]) }
+  }));
+  res = await handler({ structure: "Meeting", tag: "product", title_hint: "cafe" });
+  found.tagTitle = res.content[0].text.includes(`ID: ${uid(7)}`);
+  // One deepEqual, so a failure shows WHICH surface lost the shared matcher (one mutation, three surfaces).
+  assert.deepEqual(found, { search: true, escalated: true, tagTitle: true });
 });
