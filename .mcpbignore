@@ -20,6 +20,9 @@
 /.beads/
 /.private-journal/
 /.serena/
+# Subagent task briefs and review reports (private plan text). Excluded from git only via
+# .git/info/exclude, which mcpb does not read — so it must be listed here too (cap-ul0, 2026-10-22).
+/.superpowers/
 /docs/
 /.env
 *.log

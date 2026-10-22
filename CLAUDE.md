@@ -218,9 +218,13 @@ table + manifest.json `tools:` + version bump. `@anthropic-ai/dxt` was renamed t
 **`.mcpbignore`** (NOT `.dxtignore`) and outputs **`.mcpb`**. `.mcpb`/`.dxt` are the same zip
 format — Claude Desktop accepts both. The `.mcpbignore` must exclude root `node_modules/` (runtime
 deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads/`,
-`.private-journal/`, `.git/`) — otherwise they leak into the public artifact. Verify after packing:
-`unzip -p capacities-desktop-extension.dxt manifest.json` shows `version` + 11 tools, and the
-archive contains no `.private-journal/`/`.beads/`.
+`.private-journal/`, `.superpowers/`, `.git/`) — otherwise they leak into the public artifact. A
+folder kept out of git only by `.git/info/exclude` is NOT kept out of the pack: mcpb reads only
+`.mcpbignore` (cap-ul0: `.superpowers/sdd/` task briefs landed in a 2.2.1 repack, caught before
+commit). Verify after packing: `unzip -p capacities-desktop-extension.dxt manifest.json` shows
+`version` + 11 tools, and root-anchored paths match nothing:
+`unzip -l <dxt> | awk '{print $4}' | grep -E '^(\.private-journal|\.beads|\.superpowers|test-dist|test|\.git|\.env|node_modules)(/|$)'`
+(a bare `/test/` pattern also matches dependencies' own test folders under `server/node_modules`).
 
 ### Deployment (mcp-gateway)
 The gateway spawns the child image `ghcr.io/inconceivablelabs/capacitiesmcp:latest` (note: **no
