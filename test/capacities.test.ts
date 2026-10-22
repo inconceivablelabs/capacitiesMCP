@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CapacitiesClient, CapacitiesAPIError } from "../src/client/capacities.js";
+import { CapacitiesClient, CapacitiesAPIError, ENUMERATE_PAGE_SIZE } from "../src/client/capacities.js";
 
 // --- Mock fetch plumbing -------------------------------------------------
 
@@ -298,7 +298,12 @@ test("getEndpointType maps v2 paths to correct categories (incl. /object/url bef
 
   assert.equal(map("/space"), "space");
   assert.equal(map("/space/structures"), "space");
+  // KNOWN-NEGATIVE: "/objects/search".includes("/objects/") is true, so a generic
+  // "/objects/" branch would steal search out of its own bucket (cap-i93 design).
   assert.equal(map("/objects/search"), "search");
+  assert.equal(map("/objects/structure?id=meeting&pageSize=100"), "enumerate");
+  assert.equal(map("/objects/tag?id=abc&pageSize=100&cursor=def"), "enumerate");
+  assert.equal(map("/objects/collection?id=abc"), "enumerate");
   assert.equal(map("/object/url"), "weblink"); // MUST match before /object
   assert.equal(map("/object?id=abc&hardDelete=true"), "object");
   assert.equal(map("/object/markdown"), "object");
@@ -314,6 +319,8 @@ test("rate limiter enforces the v2 per-category limits", async () => {
   assert.equal(limits.weblink.maxRequests, 10);
   assert.equal(limits.object.maxRequests, 30);
   assert.equal(limits.blocks.maxRequests, 30);
+  assert.equal(limits.enumerate.maxRequests, 30);
+  assert.equal(limits.enumerate.windowMs, 60000);
 });
 
 // --- error body surfacing (cap-6dy.8) ------------------------------------
@@ -584,4 +591,115 @@ test("getObject WITHOUT a budget still throws immediately when the object window
   assert.ok(err instanceof CapacitiesAPIError);
   assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
   assert.equal(clock.sleeps.length, 0, "the throw path must never sleep");
+});
+
+// --- enumeration (cap-i93) -----------------------------------------------
+
+const PAGE_OK = {
+  results: [{ id: "00000000-0000-4000-8000-000000000001", structureId: "meeting", title: "T" }],
+  nextCursor: null,
+  hasMore: false
+};
+
+test("enumerateObjects: GET /objects/<kind> with id + pageSize=100, cursor only when given, in the enumerate bucket", async () => {
+  const client: any = newClient();
+  const calls = installFetch(() => makeResponse({ body: PAGE_OK }));
+
+  const page = await client.enumerateObjects("structure", "meeting");
+  assert.deepEqual(page, PAGE_OK);
+  let u = new URL(calls[0].url);
+  assert.equal(u.pathname, "/objects/structure");
+  assert.equal(u.searchParams.get("id"), "meeting");
+  assert.equal(ENUMERATE_PAGE_SIZE, 100);
+  assert.equal(u.searchParams.get("pageSize"), "100");
+  assert.equal(u.searchParams.has("cursor"), false, "no cursor on the first page");
+  assert.equal(calls[0].opts?.method ?? "GET", "GET");
+
+  await client.enumerateObjects("tag", "00000000-0000-4000-8000-00000000a001", "00000000-0000-4000-8000-000000000064");
+  u = new URL(calls[1].url);
+  assert.equal(u.pathname, "/objects/tag");
+  assert.equal(u.searchParams.get("id"), "00000000-0000-4000-8000-00000000a001");
+  assert.equal(u.searchParams.get("cursor"), "00000000-0000-4000-8000-000000000064");
+
+  // URL-encoding: a cursor carrying & = # must round-trip as ONE param, not split the query.
+  const nasty = "a&pageSize=1=b#frag";
+  await client.enumerateObjects("structure", "meeting", nasty);
+  u = new URL(calls[2].url);
+  assert.equal(u.searchParams.get("cursor"), nasty);
+  assert.deepEqual(u.searchParams.getAll("pageSize"), ["100"]);
+
+  const nastyId = "x&cursor=zz#h";
+  await client.enumerateObjects("tag", nastyId);
+  u = new URL(calls[3].url);
+  assert.equal(u.searchParams.get("id"), nastyId);
+  assert.equal(u.searchParams.has("cursor"), false, "an unencoded id would smuggle a cursor param");
+
+  assert.equal(client.rateLimiter.windows.get("enumerate").requests, 4);
+  assert.equal(client.rateLimiter.windows.get("search"), undefined, "enumeration must not spend the search bucket");
+  assert.equal(client.rateLimiter.windows.get("object"), undefined, "nor the object bucket");
+});
+
+test("enumerateObjects: a non-JSON 200 or a body without the page shape THROWS — it is never an empty page", async () => {
+  const client: any = newClient();
+  const cases: [string, any][] = [
+    ["html 200 (Cloudflare interstitial)", { contentType: "text/html", text: "<!doctype html><title>Just a moment</title>" }],
+    ["empty body", { contentLength: "0" }],
+    ["json that fails to parse", { jsonThrows: true }],
+    ["json without results", { body: { hasMore: false, nextCursor: null } }],
+    ["json without hasMore", { body: { results: [] } }],
+    ["json with a non-string cursor", { body: { results: [], hasMore: true, nextCursor: 5 } }]
+  ];
+  for (const [name, init] of cases) {
+    installFetch(() => makeResponse(init));
+    const err: any = await client.enumerateObjects("structure", "meeting").then(() => null, (e: unknown) => e);
+    assert.ok(err instanceof CapacitiesAPIError, `${name}: must throw, not return a page`);
+    assert.equal(err.code, "API_ERROR", name);
+    assert.match(err.message, /not a valid enumeration page/, name);
+  }
+  // Known-positive: a genuinely empty page is data, not an error.
+  installFetch(() => makeResponse({ body: { results: [], nextCursor: null, hasMore: false } }));
+  assert.deepEqual(await client.enumerateObjects("structure", "meeting"), { results: [], nextCursor: null, hasMore: false });
+});
+
+test("enumerateObjects: pace is forwarded — a full enumerate window sleeps one window WITH a budget, throws WITHOUT", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  installFetch(() => makeResponse({ body: PAGE_OK }));
+  for (let i = 0; i < 30; i++) await client.enumerateObjects("structure", "meeting");
+
+  // Known-negative: without a budget the full window throws and never sleeps.
+  const err: any = await client.enumerateObjects("structure", "meeting").then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0);
+
+  const budget = { remainingMs: 60000 };
+  const page = await client.enumerateObjects("structure", "meeting", undefined, budget);
+  assert.deepEqual(page, PAGE_OK);
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
+  assert.equal(budget.remainingMs, 0);
+});
+
+test("enumerateObjects: a malformed ROW (null, no id, non-string structureId) throws; a null title is accepted", async () => {
+  const client: any = newClient();
+  const ok = { id: "00000000-0000-4000-8000-000000000001", structureId: "meeting", title: "T" };
+  const bad: [string, unknown][] = [
+    ["null row", null],
+    ["row without id", { structureId: "meeting", title: "T" }],
+    ["row with empty id", { ...ok, id: "" }],
+    ["row with non-string structureId", { ...ok, structureId: 7 }]
+  ];
+  for (const [name, row] of bad) {
+    installFetch(() => makeResponse({ body: { results: [ok, row], nextCursor: null, hasMore: false } }));
+    const err: any = await client.enumerateObjects("structure", "meeting").then(() => null, (e: unknown) => e);
+    assert.ok(err instanceof CapacitiesAPIError, `${name}: must throw`);
+    assert.equal(err.code, "API_ERROR", name);
+    assert.match(err.message, /not a valid enumeration page/, name);
+  }
+  // Known-negative: a null title is tolerated.
+  const nullTitle = { ...ok, title: null };
+  installFetch(() => makeResponse({ body: { results: [nullTitle], nextCursor: null, hasMore: false } }));
+  assert.equal((await client.enumerateObjects("structure", "meeting")).results.length, 1);
 });

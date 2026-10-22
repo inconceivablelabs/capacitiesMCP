@@ -42,11 +42,12 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 #### Client Layer (`src/client/`)
 - **`capacities.ts` — CapacitiesClient**: thin transport over `fetch`. Methods: `getSpaces`,
   `getSpaceInfo`, `searchContent`, `createObject`, `updateObject`, `getObject`,
-  `getObjectMarkdown`, `appendBlocks`, `deleteObject`, `saveWeblink`, `saveToDailyNote`.
+  `getObjectMarkdown`, `appendBlocks`, `deleteObject`, `saveWeblink`, `saveToDailyNote`,
+  `enumerateObjects` (one page of `GET /objects/structure|tag`).
 - **`types.ts`**: interfaces for spaces, structures, property definitions (incl. `labelSet`,
   `multiple`, `allowedStructures`), objects, and options.
 - **Rate limiting** (per 60s window, client-side): `space` 10 · `search` 30 · `object` 30 ·
-  `blocks` 30 · `object/url` (weblink) 10. When a window is exhausted the limiter **throws**
+  `blocks` 30 · `object/url` (weblink) 10 · `enumerate` (`/objects/structure|tag`) 30. When a window is exhausted the limiter **throws**
   `CapacitiesAPIError("RATE_LIMIT_EXCEEDED", …, {retryAfterMs})` rather than silently sleeping.
 
 #### Tools Layer (`src/tools/`)
@@ -54,11 +55,27 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   "related by meaning" hits are kept but listed after the title matches and labelled — cap-1kc),
   `list_spaces` (the one scoped space), `get_space_info` (structures + property ids, types,
   `writable`, label options, relation targets).
-- **`find.ts`**: `find_objects` — live LOCATE primitive: title-seed search, kept to titles
-  containing `title_hint` via `matchesTitle` (`utils/normalize.ts`; drops semantic hits — cap-1kc) →
-  per-candidate `GET /object` (JSON, paced) → client-side filter/sort over typed
-  property values. Returns ids+titles+surfaced values, NO bodies (compose with
-  `get_object`). No persistent state (cap-0yu).
+- **`find.ts`**: `find_objects` — live LOCATE primitive (cap-0yu, cap-i93). Stage 1 seeds one of
+  four ways: **title** (`/objects/search`, kept to titles containing `title_hint` via
+  `matchesTitle` in `utils/normalize.ts`, which drops semantic hits — cap-1kc), **tag**, **tag +
+  title**, or **structure only** (list the whole type). A title search whose RAW result count hits
+  50 escalates to listing the structure. Listings read up to `page_budget` pages (default 12, max
+  25) and are ordered by title date (newest first; oldest first for an ascending date sort;
+  undated after dated either way) before the `fetch_cap` cut (default 30, max 50). Stage 2 is per-candidate `GET /object` (JSON, paced), then client-side
+  filter/sort. **Short-circuit:** no filters and no sort returns ids+titles with zero GETs. **Per
+  call:** a call that LISTS stays within 45 requests in total (a plain title search is exempt and
+  keeps `fetch_cap` up to 50); at most 5 relation filters (labels/dates do not count). A failure on a
+  listing PAGE ends the listing as a PARTIAL with the rows read so far (only a 401 there fails the
+  call); the structure read, the seed search and name resolution still fail it as before. Every
+  non-error result carries `structuredContent` (`seed_method`, `seed_complete`, `candidates_complete`,
+  `seed_size`, `considered`, `errored`, `matched`, `returned`); the full answer needs both flags true
+  AND `matched === returned`. **Output contract:** a `Note:` line means incomplete, and the phrase
+  `checked N of M candidates` is reserved for the stage-2 rate-budget Note (PA parses both).
+  Returns NO bodies (compose with `get_object`); no persistent state.
+- **`enumerate.ts`**: `enumerateAll` — walks `/objects/structure|tag` pages by cursor up to a page
+  budget, dedupes by id, and reports `complete` (last page said `hasMore:false`), `stopReason`,
+  `pagesRead` and `requestsIssued`. Rate-limit, API and network errors end it as a partial; only
+  `AUTHENTICATION_FAILED` throws.
 - **`object.ts`**: `create_object`, `update_object`, `get_object`, `append_to_object`,
   `delete_object`. Also the shared, write-free helpers `buildWrappers` + `finalizeRelationPlans`
   used by both create and update.
@@ -75,6 +92,9 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 #### Utilities (`src/utils/`)
 - **validation.ts**: input validation (URLs, env). Note: tools no longer validate a `space_id`
   UUID — v2 tokens are single-space.
+- **title-date.ts**: `parseTitleDate` (leftmost `YYYY-MM-DD`, `May 19, 2026` or `3/18/26` date in a
+  title) and `orderEnumerated` (dated first by date, then undated, stable) — orders listed
+  candidates before `find_objects` cuts them.
 
 ### The object model (properties vs. body)
 
@@ -163,6 +183,10 @@ Objects have two content layers, handled differently — this is the central men
 - **`/objects/search` returns semantic hits too**, interleaved with title matches and unmarked. Only
   `matchesTitle` (`src/utils/normalize.ts`) says which hits are title matches. Below the 50 cap,
   every title match is still returned. (cap-1kc, live probe 2026-10-21.)
+- **`/objects/structure|tag` answer a bogus id with `200 {results:[]}`** — resolve ids strictly
+  (`find_objects` resolves the structure and the tag name before listing), and `enumerateObjects`
+  throws on a non-JSON page rather than returning empty, so "nothing exists" is never a parse
+  failure in disguise. (cap-i93.)
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
 ### Design docs

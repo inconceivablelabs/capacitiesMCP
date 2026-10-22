@@ -34,8 +34,8 @@ export function normalizeForTitleMatch(s: string): string {
 
 // True when `title` contains `query` under normalizeForTitleMatch. A query that
 // normalizes to "" (all punctuation) matches EVERYTHING, so callers must check
-// `normalizeForTitleMatch(query) === ""` first and skip filtering rather than
-// treat every hit as a title match.
+// `normalizeForTitleMatch(query) === ""` first: find_objects rejects such a
+// hint (cap-i93 U5); search_content passes it through unclassified.
 export function matchesTitle(title: string | null | undefined, query: string): boolean {
   return normalizeForTitleMatch(title ?? "").includes(normalizeForTitleMatch(query));
 }
