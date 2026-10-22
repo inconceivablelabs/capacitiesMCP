@@ -2179,3 +2179,18 @@ test("find_objects: a pretty-printed JSON error body reaches a Note compacted, n
   const text = res.content[0].text as string;
   assert.match(text, /^Note: stopped reading candidates after 3 consecutive read errors \(API error 400: \{"code":"bad_request","message":"nope","details":\[\{"path":"id"\}\]\}\); results may be incomplete\.$/m);
 });
+
+// === cap-dnf review I1: a 403 ban page stops stage 2 through the rate path ==
+
+test("find_objects: a 403 Cloudflare ban on the first GET stops stage 2 via the rate Note — exactly 1 GET (I1)", async () => {
+  const handler = getFind();
+  const ban = "<!DOCTYPE html>\n<h1>Error 1015</h1>\n<p>The owner of this website has banned you temporarily.</p>";
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: { status: 403, text: ban } } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: rate budget reached — checked 0 of 5 candidates/m);
+  assert.doesNotMatch(text, /stopped reading candidates/);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+});

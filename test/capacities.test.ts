@@ -751,3 +751,51 @@ test("makeRequest: an empty or blank error body omits the ': body' part (cap-dnf
     assert.equal(err.message, "API error 502");
   }
 });
+
+// --- Cloudflare ban classification (cap-dnf review I1) ----------------------
+// personal-assistant classifies "rate limit" by searching the WHOLE message for
+// the phrase. A ban page can arrive on a non-429 (a hard ban can be 403), and the
+// shaped one-line body no longer carries the page's own wording, so the client
+// must classify it.
+
+const CF_BAN_HTML = [
+  "<!DOCTYPE html>",
+  "<html><head><title>Access denied | api.capacities.io used Cloudflare to restrict access</title></head>",
+  "<body><h1>Error 1015</h1><h2>You are being rate limited</h2>",
+  "<p>The owner of this website (api.capacities.io) has banned you temporarily from accessing this website.</p>",
+  "</body></html>"
+].join("\n");
+
+test("makeRequest: a 403 Cloudflare ban page is RATE_LIMIT_EXCEEDED with the real status and raw body (I1)", async () => {
+  for (const html of [CF_BAN_HTML, "<html>\n<p>has banned you temporarily</p>", "<html>\n<b>error code: 1015</b>", "<p>\nYou are being rate limited</p>"]) {
+    installFetch(() => makeResponse({ ok: false, status: 403, text: html }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.ok(err instanceof CapacitiesAPIError);
+    assert.equal(err.code, "RATE_LIMIT_EXCEEDED", html);
+    assert.ok(err.message.startsWith("Rate limit exceeded"), err.message);
+    assert.ok(/rate limit/i.test(err.message), "PA's whole-message search finds the phrase");
+    assert.equal(err.details.status, 403);
+    assert.equal(err.details.body, html);
+  }
+});
+
+test("makeRequest: a 403 with an unrelated HTML page stays API_ERROR (I1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<!DOCTYPE html>\n<h1>Forbidden</h1>\n<p>You do not have access to this space.</p>" }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+  assert.match(err.message, /^API error 403: <!DOCTYPE html>$/);
+});
+
+test("makeRequest: a JSON 403 that mentions being rate limited inside a string stays API_ERROR — JSON is an app error, not a Cloudflare page (I1)", async () => {
+  const json = JSON.stringify({ error: "forbidden", message: "You are being rate limited by policy; banned you temporarily; error code: 1015" });
+  installFetch(() => makeResponse({ ok: false, status: 403, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+  assert.equal(err.details.status, 403);
+});
+
+test("makeRequest: a 401 carrying ban wording stays AUTHENTICATION_FAILED (I1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 401, text: CF_BAN_HTML }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "AUTHENTICATION_FAILED");
+});

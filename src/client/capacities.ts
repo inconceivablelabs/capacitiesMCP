@@ -1,6 +1,6 @@
 
 // File: src/client/capacities.ts - Using native fetch
-import { errorBodyText } from "../utils/error-text.js";
+import { errorBodyText, isJsonDocument } from "../utils/error-text.js";
 import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject, ObjectPage } from "./types.js";
 
 // Rate-limit window length (ms). Exported so composite-write callers can seed a
@@ -9,6 +9,9 @@ export const WINDOW_MS = 60000;
 
 // Page size for GET /objects/structure|tag enumeration (the API maximum).
 export const ENUMERATE_PAGE_SIZE = 100;
+
+// Wording of Cloudflare's 1015 rate-limit / temporary-ban page (cap-dnf review I1).
+const CLOUDFLARE_BAN = /error\s*(code)?\s*:?\s*1015|you are being rate limited|banned you temporarily/i;
 export type EnumerationKind = "structure" | "tag";
 
 // A mutable, operation-level bounded-wait budget. A single instance is shared
@@ -80,12 +83,17 @@ export class CapacitiesClient {
       // (JSON kept, anything else cut to one line); details.body stays raw (cap-dnf).
       const shown = errorBodyText(body);
 
-      if (response.status === 429) {
+      // A Cloudflare ban page is a rate limit whatever its status (a hard ban can
+      // be 403). The shaped body no longer carries its wording, and consumers
+      // (personal-assistant) classify by "rate limit" in the message — so classify
+      // here. A JSON body is an app error, never a Cloudflare page. 401 stays auth.
+      const cloudflareBan = response.status !== 401 && !isJsonDocument(body) && CLOUDFLARE_BAN.test(body);
+      if (response.status === 429 || cloudflareBan) {
         const retryAfter = response.headers.get("retry-after");
         throw new CapacitiesAPIError(
           "RATE_LIMIT_EXCEEDED",
           "Rate limit exceeded" + (shown ? `: ${shown}` : ""),
-          { status: 429, body, ...(retryAfter ? { retryAfter } : {}) }
+          { status: response.status, body, ...(retryAfter ? { retryAfter } : {}) }
         );
       }
       if (response.status === 401) {

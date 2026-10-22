@@ -42,7 +42,7 @@ export function firstLineBrief(text: string | undefined, max: number): string {
   return capCodePoints(neutraliseCountPhrase(line), max);
 }
 
-function isJsonDocument(text: string): boolean {
+export function isJsonDocument(text: string): boolean {
   try {
     const parsed = JSON.parse(text);
     return typeof parsed === "object" && parsed !== null;
