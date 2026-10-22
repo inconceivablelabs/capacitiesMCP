@@ -251,6 +251,12 @@ The token + tool list live in the mcp-gateway repo's `docker/config.yaml` and
 needs a manual host `docker pull … :latest` + gateway restart. After redeploying, existing MCP
 clients must reconnect (`/mcp`) to see the new tool surface.
 
+**Verify a change from a real LLM client before merging — `--pull never` makes this cheap.** Build the
+branch locally, `docker tag` it as `:latest`, restart the gateway, and call the tool from a Claude Code
+session; switch back to the rollback tag if it misbehaves. A stdio smoke or unit test that reads
+`content[0]` cannot see what the model is shown: 2.2.0 passed all of them and was blank to every LLM
+(cap-ul0). A session's ToolSearch schema can be stale after a restart — trust a live call, not the schema.
+
 **Verifying a built image (stdio smoke).** Hold stdin open past the last request or the server hits
 EOF and exits before flushing — piping the file straight in is silent ~2/3 of runs, and a silent *control*
 reads as "the deployed image is broken" rather than "the probe raced":
