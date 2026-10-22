@@ -925,3 +925,81 @@ test("find_objects: a candidate that errors in stage 2 makes candidates_complete
   assert.equal(res.structuredContent.errored, 1);
   assert.equal(res.structuredContent.considered, 2, "considered counts the errored one");
 });
+
+// === cap-i93 Task 5 fix round ===============================================
+
+// Page 1 of `n` structure rows (hasMore, cursor = last id), then `fail` on page 2.
+function onePageThenFail(n: number, fail: { status: number; text: string }): PageSpec[] {
+  const rows = summaries(1, n, k => `Kickoff ${k}`);
+  return [{ results: rows, hasMore: true, nextCursor: rows[rows.length - 1].id }, { fail }];
+}
+
+test("find_objects: a listing error Note carries only the first line of the error, capped — never the whole HTTP body (I1)", async () => {
+  const later = "<title>LATER-LINE-MARKER</title>";
+  const bodies = [
+    // Long first line: the cap must cut it.
+    `<!doctype html><html><head>${"x".repeat(300)}\n${later}\n${"<p>filler</p>\n".repeat(40)}`,
+    // Short first line: only the line split keeps the later lines out.
+    `<!doctype html>\n${later}\n${"<p>filler</p>\n".repeat(40)}`
+  ];
+  for (const text of bodies) {
+    assert.ok(text.length > 200 && text.includes("\n"), "fixture: a long multi-line body");
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: onePageThenFail(3, { status: 503, text }) } }));
+    const res = await handler({ structure: "Meeting" });
+    assert.equal(res.isError, undefined);
+    const note = res.content[0].text.split("\n").find((l: string) => l.startsWith("Note: listing stopped after"));
+    assert.ok(note, "the stage-1 error Note is present");
+    // The detail is capped at 200 chars (+ "…"); the sentence around it adds ~100.
+    const detail = note.match(/could not be read \((.*)\); results may be incomplete\.$/)?.[1] ?? "";
+    assert.ok(detail.startsWith("API error 503"), `detail: ${detail.slice(0, 40)}`);
+    assert.ok(detail.length <= 201, `detail is ${detail.length} chars`);
+    assert.ok(note.length < 320, `Note is ${note.length} chars`);
+    assert.match(note, /503/, "the status survives");
+    assert.match(note, /; results may be incomplete\.$/, "the sentence still closes on one line");
+    assert.ok(!res.content[0].text.includes("LATER-LINE-MARKER"), "no later line of the body reaches the output");
+  }
+});
+
+test("find_objects: a stage-2 rate stop makes candidates_complete false (I2)", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Note: [1, 2, 3].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" })) },
+    getFail: { m2: { status: 429, text: "slow down" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /^Note: rate budget reached — checked 1 of 3 candidates/m);
+  assert.equal(res.structuredContent.candidates_complete, false);
+  assert.equal(res.structuredContent.considered, 1);
+  assert.equal(res.structuredContent.seed_size, 3);
+});
+
+test("find_objects: a listing that fails on page 2 keeps and shows page 1's rows (M1)", async () => {
+  const handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: onePageThenFail(10, { status: 500, text: "boom" }) } }));
+  const res = await handler({ structure: "Meeting" });
+  assert.equal(res.isError, undefined);
+  const text = res.content[0].text;
+  for (let n = 1; n <= 10; n++) assert.ok(text.includes(`ID: ${uid(n)}`), `row ${n} shown`);
+  assert.match(text, /^Note: listing stopped after 1 page\(s\) because a page could not be read/m);
+  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(res.structuredContent.seed_size, 10);
+});
+
+test("find_objects: a tag over 512 characters errors before any call; 512 passes the guard (M2)", async () => {
+  let handler = getFind();
+  let calls = installFind(findRouter({}));
+  let res = await handler({ structure: "Meeting", tag: "t".repeat(513) });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /tag is 513 characters; the maximum is 512/);
+  assert.equal(calls.length, 0);
+
+  // 512 reaches tag resolution (and then fails as an unknown tag — a later, networked error).
+  handler = getFind();
+  calls = installFind(findRouter({}));
+  res = await handler({ structure: "Meeting", tag: "t".repeat(512) });
+  assert.doesNotMatch(res.content[0].text, /the maximum is 512/);
+  assert.match(res.content[0].text, /no tag named/);
+  assert.equal(searchQueries(calls).length, 1, "the 512-character tag reached the tag search");
+});

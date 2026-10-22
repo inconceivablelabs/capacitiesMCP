@@ -50,6 +50,17 @@ export type FindExactness = {
   returned: number;     // rows in the response
 };
 
+const ERROR_DETAIL_MAX = 200;
+
+// An API error message carries the whole HTTP body (a Cloudflare page runs to
+// thousands of characters), and that body is server-controlled text landing in
+// tool output. Keep the first line, which holds the status, and cap it.
+function briefError(message: string | undefined): string {
+  const first = (message ?? "").split("\n", 1)[0].trim();
+  if (!first) return "unknown error";
+  return first.length > ERROR_DETAIL_MAX ? first.slice(0, ERROR_DETAIL_MAX) + "…" : first;
+}
+
 // Stage-1 Note for an incomplete listing. Never uses stage 2's "checked N of M
 // candidates" phrase: personal-assistant's backfill keys on it (U6).
 function enumerationNote(e: EnumerationResult): string | null {
@@ -63,7 +74,7 @@ function enumerationNote(e: EnumerationResult): string | null {
     case "no-cursor":
       return `Note: the listing reported more pages but returned no usable cursor — read ${e.pagesRead} page(s); results may be incomplete.`;
     default:
-      return `Note: listing stopped after ${e.pagesRead} page(s) because a page could not be read (${e.errorMessage ?? "unknown error"}); results may be incomplete.`;
+      return `Note: listing stopped after ${e.pagesRead} page(s) because a page could not be read (${briefError(e.errorMessage)}); results may be incomplete.`;
   }
 }
 
@@ -465,6 +476,10 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         }
         if (tag !== undefined && tag.trim() === "") {
           return { content: [{ type: "text", text: "tag must be a non-empty tag name." }], isError: true };
+        }
+        // A tag name is resolved by the same search, so the same query limit applies.
+        if (tag !== undefined && tag.length > TITLE_HINT_MAX) {
+          return { content: [{ type: "text", text: `tag is ${tag.length} characters; the maximum is ${TITLE_HINT_MAX}.` }], isError: true };
         }
         // zod's bounds and default are applied by the MCP SDK's input parse, NOT on a
         // direct handler call, so clamp here too (A11).
