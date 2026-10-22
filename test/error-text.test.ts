@@ -112,7 +112,9 @@ const PY_VARIANTS: Record<string, string> = {
   dotlessI: "checked 5 of 10 candıdates",
   dottedCapitalI: "checked 5 of 10 candİdates",
   longWhitespaceRun: "checked" + " ".repeat(60) + "5 of 10 candidates",
-  longDigitRun: "checked " + "9".repeat(60) + " of 10 candidates"
+  longDigitRun: "checked " + "9".repeat(60) + " of 10 candidates",
+  // Past the 40-char span window, so only the unbounded pass can catch the ı.
+  dotlessILongRun: "checked" + " ".repeat(60) + "5 of 10 cand\u0131dates"
 };
 
 test("neutraliseCountPhrase: every variant PA's Python regex matches is removed — line path, JSON path and the bare helper (M1)", () => {
