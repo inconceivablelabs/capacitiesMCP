@@ -386,6 +386,7 @@ test("find_objects: an escalated seed of 50 with fetch_cap 50 still takes exactl
   installFind(enumRouter({ base: { search: { Note: fifty } }, structurePages: { meeting: pagesOf(fifty) } }));
   const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
+  assert.equal(res.structuredContent.seed_method, "search+enumeration", "a raw seed of 50 escalates (M3)");
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep for the 31st fetch");
   assert.doesNotMatch(res.content[0].text, /returned the maximum 50/);
 });
@@ -1036,7 +1037,7 @@ test("find_objects: a COMPLETED escalation emits no Note, says it listed instead
   assert.equal(res.isError, undefined);
   const text = res.content[0].text;
   assert.match(text, /^Found 25 Meetings matching "Retro"/);
-  assert.match(text, /^\(The title search returned its 50-result maximum, so all Meetings were listed instead: 1 page\(s\), 35 summaries\.\)$/m);
+  assert.match(text, /^\(The title search returned its 50-result maximum, so the Meetings were listed instead: 1 page\(s\), 35 summaries\.\)$/m);
   assert.doesNotMatch(text, /^[ \t]*Note:/im, "a completed escalation is complete (U8, mutation x)");
   assert.doesNotMatch(text, /were ignored/, "the dropped-count line belongs to the search path only (U8)");
   assert.equal(res.structuredContent.seed_complete, true);
@@ -1089,15 +1090,20 @@ test("find_objects canary (U4): a completed escalation logs ONE stderr line nami
 
 test("find_objects canary (U4): silent on a rate-stopped and on an unreadable listing — only a COMPLETED listing is evidence", async () => {
   const search = [...summaries(1, 20, n => `Retro ${n}`), ...summaries(1001, 1030, n => `Planning ${n}`)];
-  const stops: [string, PageSpec[]][] = [
-    ["429 on page 1", [{ fail: { status: 429, text: "<!doctype html>banned" } }]],
-    ["HTML 200 on page 1", [{ html: "<!doctype html><title>Just a moment</title>" }]]
+  // [name, pages, pages read]: the info line must report pages READ, not requests
+  // issued — each stop below issues 1 request (M1).
+  const stops: [string, PageSpec[], number][] = [
+    ["429 on page 1", [{ fail: { status: 429, text: "<!doctype html>banned" } }], 0],
+    ["HTML 200 on page 1", [{ html: "<!doctype html><title>Just a moment</title>" }], 0],
+    // Retro 11..20 look missing; a gate listing stop reasons can forget "no-cursor" (M2).
+    ["no cursor after page 1", [{ results: summaries(1, 10, n => `Retro ${n}`), hasMore: true, nextCursor: null }], 1]
   ];
-  for (const [name, pages] of stops) {
+  for (const [name, pages, pagesRead] of stops) {
     const handler = getFind();
     installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pages } }));
     const r = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" }));
     assert.equal(r.value.structuredContent.seed_complete, false, `${name}: the listing really was partial`);
+    assert.match(r.value.content[0].text, new RegExp(`^\\(The title search returned its 50-result maximum, so the Meetings were listed instead: ${pagesRead} page\\(s\\), `, "m"), `${name}: pages read`);
     assert.deepEqual(r.lines, [], `${name}: all 20 title matches look missing here, and none may be reported`);
   }
 });

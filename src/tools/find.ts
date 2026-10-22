@@ -567,7 +567,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             candidates = listing.results.filter(r => r.structureId === struct.id && matchesTitle(r.title, title_hint));
             seedMethod = "search+enumeration";
             seedComplete = listing.complete;
-            infoLines.push(`(The title search returned its ${SEARCH_LIMIT}-result maximum, so all ${plural} were listed instead: ${listing.pagesRead} page(s), ${listing.results.length} summaries.)`);
+            infoLines.push(`(The title search returned its ${SEARCH_LIMIT}-result maximum, so the ${plural} were listed instead: ${listing.pagesRead} page(s), ${listing.results.length} summaries.)`);
             const note = enumerationNote(listing);
             if (note) stage1Notes.push(note);
             if (listing.complete) logFidelityCanary(struct.id, titleSeed, candidates);
