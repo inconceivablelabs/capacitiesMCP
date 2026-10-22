@@ -2003,3 +2003,44 @@ test("find_objects: a success resets the failure run — fail, ok, fail, fail, o
   assert.match(text, /^Note: 3 candidate\(s\) could not be read and were skipped\.$/m);
   assert.equal(exactnessOf(res).considered, 5);
 });
+
+// === cap-9ti: strict date grammar in filters ================================
+// Date.parse accepts "2026" and other short forms, which compiled a date-equals
+// filter with day="2026" that silently matched nothing.
+
+test("compileFilters: a date that does not begin YYYY-MM-DD is a problem for equals, after and before (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const bad of ["2026", "2026-07", "July 4 2026"]) {
+    assert.ok(!Number.isNaN(Date.parse(bad)), `fixture: Date.parse accepts ${bad} (else the test proves nothing)`);
+    for (const value of [bad, { after: bad }, { before: bad }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(compiled, [], `${JSON.stringify(value)} must not compile`);
+      assert.equal(problems.length, 1, `${JSON.stringify(value)}: ${problems.join(" | ")}`);
+      assert.match(problems[0], /is not a valid ISO date \(YYYY-MM-DD or full timestamp\): /);
+      assert.ok(problems[0].endsWith(bad), `the problem names the value: ${problems[0]}`);
+    }
+  }
+});
+
+test("compileFilters: YYYY-MM-DD and a full timestamp still compile for equals, after and before (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const good of ["2026-07-04", "2026-07-04T09:00:00Z"]) {
+    for (const value of [good, { after: good }, { before: good }, { after: good, before: "2026-12-31" }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(problems, [], `${JSON.stringify(value)}`);
+      assert.equal(compiled.length, 1);
+    }
+  }
+  const { compiled } = await compileFilters(findClient(), idx, { Date: "2026-07-04" }, { remainingMs: 60000 });
+  assert.equal((compiled[0] as any).day, "2026-07-04");
+});
+
+test("compileFilters: a well-shaped but impossible date is still rejected by Date.parse (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-13-45" }, { remainingMs: 60000 });
+  assert.deepEqual(compiled, []);
+  assert.match(problems[0], /is not a valid ISO date/);
+});

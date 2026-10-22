@@ -76,6 +76,15 @@ function exactnessBlock(exactness: FindExactness): { type: "text"; text: string 
 
 const ERROR_DETAIL_MAX = 200;
 
+// Date.parse alone accepts "2026", "2026-07" and "July 4 2026"; a date-equals
+// filter compiled from one has no YYYY-MM-DD day and silently matches nothing
+// (cap-9ti). Require the ISO day prefix, then let Date.parse reject the rest.
+const ISO_DAY_PREFIX = /^\d{4}-\d{2}-\d{2}/;
+const INVALID_DATE = "is not a valid ISO date (YYYY-MM-DD or full timestamp)";
+function parseFilterDate(s: string): number {
+  return ISO_DAY_PREFIX.test(s) ? Date.parse(s) : NaN;
+}
+
 // Stage 2 stops after this many read errors in a row (cap-fvb).
 const MAX_CONSECUTIVE_READ_ERRORS = 3;
 
@@ -388,18 +397,18 @@ export async function compileFilters(
         let afterMs: number | null = null;
         let beforeMs: number | null = null;
         if (r.after !== undefined) {
-          afterMs = Date.parse(r.after);
-          if (Number.isNaN(afterMs)) { problems.push(`filter \`${key}\` after is not a valid ISO date: ${r.after}`); continue; }
+          afterMs = parseFilterDate(r.after);
+          if (Number.isNaN(afterMs)) { problems.push(`filter \`${key}\` after ${INVALID_DATE}: ${r.after}`); continue; }
         }
         if (r.before !== undefined) {
-          beforeMs = Date.parse(r.before);
-          if (Number.isNaN(beforeMs)) { problems.push(`filter \`${key}\` before is not a valid ISO date: ${r.before}`); continue; }
+          beforeMs = parseFilterDate(r.before);
+          if (Number.isNaN(beforeMs)) { problems.push(`filter \`${key}\` before ${INVALID_DATE}: ${r.before}`); continue; }
         }
         compiled.push({ propId: def.id, propName: def.name, kind: "date-range", afterMs, beforeMs });
       } else {
         const s = String(raw);
-        const instant = Date.parse(s);
-        if (Number.isNaN(instant)) { problems.push(`filter \`${key}\` is not a valid ISO date: ${s}`); continue; }
+        const instant = parseFilterDate(s);
+        if (Number.isNaN(instant)) { problems.push(`filter \`${key}\` ${INVALID_DATE}: ${s}`); continue; }
         compiled.push({ propId: def.id, propName: def.name, kind: "date-equals", day: dayOf(s), hasTime: hasTimeComponent(s), instant });
       }
       continue;
