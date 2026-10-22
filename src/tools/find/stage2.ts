@@ -34,7 +34,10 @@ export async function fetchCandidates(
   let erroredCount = 0;
   // Circuit breaker (cap-fvb): a Cloudflare ban can arrive as a 403, and every
   // further GET extends an IP-level ban shared by every client on our egress.
-  // Stop at once on a 403, or after a run of failures a success would reset.
+  // Stop at once on a 403, or after a run of SERVICE failures (5xx, or no HTTP
+  // status at all — a network error) that only a success resets. Any other 4xx
+  // (a deleted candidate's 404) says nothing about the service, so it neither
+  // advances nor resets the run (cap-fvb review M3).
   let consecutiveErrors = 0;
   let breakerStop: string | null = null;
   for (let i = 0; i < planned; i++) {
@@ -46,14 +49,15 @@ export async function fetchCandidates(
     } catch (e) {
       if (e instanceof CapacitiesAPIError && e.code === "RATE_LIMIT_EXCEEDED") { rateStopped = true; break; }
       erroredCount++;
-      consecutiveErrors++;
+      const status = e instanceof CapacitiesAPIError ? e.details?.status : undefined;
+      if (typeof status !== "number" || status >= 500) consecutiveErrors++;
       const detail = briefError(e instanceof Error ? e.message : String(e));
-      if (e instanceof CapacitiesAPIError && e.details?.status === 403) {
+      if (status === 403) {
         breakerStop = `a 403 from the server (${detail})`;
         break;
       }
       if (consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS) {
-        breakerStop = `${consecutiveErrors} consecutive read errors (${detail})`;
+        breakerStop = `${consecutiveErrors} server or network errors with no successful read between them (${detail})`;
         break;
       }
     }
