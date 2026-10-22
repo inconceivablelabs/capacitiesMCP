@@ -40,7 +40,7 @@ export function startStub() {
         res.writeHead(status, { "content-type": type });
         res.end(typeof body === "string" ? body : JSON.stringify(body));
       };
-      if (req.headers.authorization !== `Bearer ${TOKEN}` || req.headers["x-capacities-api-version"] !== "0.1.0") return send(401, { error: "auth" });
+      if (req.headers.authorization !== `Bearer ${TOKEN}` || req.headers["x-capacities-api-version"] !== "1.0.0") return send(401, { error: "auth" });
       if (req.method === "GET" && u.pathname === "/space/structures") return send(200, structures);
       if (req.method === "POST" && u.pathname === "/objects/search") {
         const b = JSON.parse(raw || "{}");
