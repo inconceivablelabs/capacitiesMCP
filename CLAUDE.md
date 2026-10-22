@@ -67,8 +67,10 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   keeps `fetch_cap` up to 50); at most 5 relation filters (labels/dates do not count). A failure on a
   listing PAGE ends the listing as a PARTIAL with the rows read so far (only a 401 there fails the
   call); the structure read, the seed search and name resolution still fail it as before. Every
-  non-error result carries `structuredContent` (`seed_method`, `seed_complete`, `candidates_complete`,
-  `seed_size`, `considered`, `errored`, `matched`, `returned`); the full answer needs both flags true
+  non-error result carries a SECOND text block, `content[1]`, of compact JSON (`seed_method`,
+  `seed_complete`, `candidates_complete`, `seed_size`, `considered`, `errored`, `matched`,
+  `returned`) — not `structuredContent`, because Claude Code shows the model the structuredContent
+  INSTEAD of the text (cap-ul0); `content[0]` stays the human text. The full answer needs both flags true
   AND `matched === returned`. **Output contract:** a `Note:` line means incomplete, and the phrase
   `checked N of M candidates` is reserved for the stage-2 rate-budget Note (PA parses both).
   Returns NO bodies (compose with `get_object`); no persistent state.
@@ -180,6 +182,9 @@ Objects have two content layers, handled differently — this is the central men
   must mean incomplete, and informational lines must not start with it. Before changing the output
   format, grep personal-assistant for the tool name and run the real parser on the new output.
   (cap-1kc `e1cba05`, 2026-10-21.)
+- **Never return `structuredContent` from a tool whose text matters to an LLM:** Claude Code 2.1.x
+  shows the model only the structuredContent JSON and drops `content[0].text` (cap-ul0, 2026-10-22).
+  Put machine-readable fields in a second text block.
 - **`/objects/search` returns semantic hits too**, interleaved with title matches and unmarked. Only
   `matchesTitle` (`src/utils/normalize.ts`) says which hits are title matches. Below the 50 cap,
   every title match is still returned. (cap-1kc, live probe 2026-10-21.)

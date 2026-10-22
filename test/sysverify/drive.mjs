@@ -41,7 +41,12 @@ try {
     const before = stub.requests.length;
     const r = await client.callTool({ name: "find_objects", arguments: args });
     const objectGets = stub.requests.slice(before).filter(q => q.path === "/object").length;
-    results[name] = { text: r.content[0].text, isError: r.isError ?? false, structured: r.structuredContent ?? null, objectGets };
+    // cap-ul0: Claude Code shows the model ONLY structuredContent when present, so
+    // it must never come back; the exactness fields ride in content[1] as JSON.
+    assert.equal(r.structuredContent, undefined, `${name}: structuredContent must be absent`);
+    const isError = r.isError ?? false;
+    if (!isError) assert.equal(r.content.length, 2, `${name}: content[0] text + content[1] exactness JSON`);
+    results[name] = { text: r.content[0].text, isError, structured: isError ? null : JSON.parse(r.content[1].text), objectGets };
     return results[name];
   };
 

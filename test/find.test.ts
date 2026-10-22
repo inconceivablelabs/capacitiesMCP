@@ -243,6 +243,15 @@ function fakeClock() {
   const sleeps: number[] = [];
   return { now: () => t, sleep: async (ms: number) => { t += ms; sleeps.push(ms); }, sleeps };
 }
+// The FindExactness fields arrive as content[1], compact JSON. structuredContent
+// must stay absent: Claude Code shows the model ONLY structuredContent when it is
+// present, which hid every id and Note: line from LLM callers (cap-ul0).
+function exactnessOf(res: any): any {
+  assert.equal(res.structuredContent, undefined, "find_objects must not return structuredContent (cap-ul0)");
+  assert.equal(res.content.length, 2, "content[0] = human text, content[1] = exactness JSON");
+  assert.equal(res.content[1].type, "text");
+  return JSON.parse(res.content[1].text);
+}
 function getFind(clock?: { now: () => number; sleep: (ms: number) => Promise<void> }) {
   const tools: Record<string, any> = {};
   const server: any = { registerTool(name: string, config: any, handler: any) { tools[name] = { name, config, handler }; } };
@@ -386,7 +395,7 @@ test("find_objects: an escalated seed of 50 with fetch_cap 50 is clamped to 42 G
   const calls = installFind(enumRouter({ base: { search: { Note: fifty } }, structurePages: { meeting: pagesOf(fifty) } }));
   const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
-  assert.equal(res.structuredContent.seed_method, "search+enumeration", "a raw seed of 50 escalates (M3)");
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration", "a raw seed of 50 escalates (M3)");
   // 45 − space − search − 1 listing page = 42 > 30, so one window wait.
   assert.equal(fetchedIds(calls).length, 42);
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep for the 31st fetch");
@@ -564,7 +573,7 @@ test("find_objects: a saturated seed with ZERO title matches escalates — match
   text = res.content[0].text;
   assert.match(text, /^No Meetings found with a title matching "Roadmap"/);
   assert.doesNotMatch(text, /^[ \t]*Note:/im);
-  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(res).seed_complete, true);
 });
 
 test("find_objects: an all-punctuation title_hint is an error before any network call (U5)", async () => {
@@ -761,9 +770,9 @@ test("find_objects: no title_hint and no tag lists the structure — header has 
   assert.equal(u.pathname, "/objects/structure");
   assert.equal(u.searchParams.get("id"), "meeting");
   assert.deepEqual(searchQueries(calls), [], "no title search on the no-seed shape");
-  assert.equal(res.structuredContent.seed_method, "structure-enumeration");
-  assert.equal(res.structuredContent.seed_complete, true);
-  assert.equal(res.structuredContent.seed_size, 3);
+  assert.equal(exactnessOf(res).seed_method, "structure-enumeration");
+  assert.equal(exactnessOf(res).seed_complete, true);
+  assert.equal(exactnessOf(res).seed_size, 3);
 });
 
 test("find_objects: page budget exhausted → stage-1 Note without the stage-2 count phrase; seed incomplete", async () => {
@@ -775,8 +784,8 @@ test("find_objects: page budget exhausted → stage-1 Note without the stage-2 c
   const text = res.content[0].text;
   assert.match(text, /^Note: listing stopped at the page budget — read 2 pages \(200 summaries\) and more remain/m);
   assert.doesNotMatch(text, /checked\s+\d+\s+of\s+\d+\s+candidates/i, "stage-1 counts never use the stage-2 phrase (U6)");
-  assert.equal(res.structuredContent.seed_complete, false);
-  assert.equal(res.structuredContent.seed_size, 200);
+  assert.equal(exactnessOf(res).seed_complete, false);
+  assert.equal(exactnessOf(res).seed_size, 200);
 });
 
 test("find_objects: a resolved structure that enumerates to [] is a genuine none", async () => {
@@ -785,8 +794,51 @@ test("find_objects: a resolved structure that enumerates to [] is a genuine none
   const res = await handler({ structure: "Meeting" });
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /^No Meetings found \(live as of /);
-  assert.equal(res.structuredContent.seed_complete, true);
-  assert.equal(res.structuredContent.returned, 0);
+  assert.equal(exactnessOf(res).seed_complete, true);
+  assert.equal(exactnessOf(res).returned, 0);
+});
+
+test("find_objects: no return path sends structuredContent; content[0] is the human text, content[1] the exactness JSON (cap-ul0)", async () => {
+  // Claude Code 2.1.x shows the model ONLY structuredContent when present, so a
+  // result carrying it hid every id and Note: line. One row per return site.
+  const keys = ["candidates_complete", "considered", "errored", "matched", "returned", "seed_complete", "seed_method", "seed_size"];
+  const rows: { name: string; res: any; text: RegExp }[] = [];
+  let calls: FCall[];
+
+  let handler = getFind();
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf([]) } }));
+  rows.push({ name: "genuine none", res: await handler({ structure: "Meeting" }), text: /^No Meetings found \(live as of / });
+
+  handler = getFind();
+  calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(summaries(1, 3, n => `Kickoff ${n}`)) } }));
+  const shortRes = await handler({ structure: "Meeting" });
+  assert.equal(fetchedIds(calls).length, 0, "short-circuit: zero GET /object");
+  rows.push({ name: "short-circuit", res: shortRes, text: /^Found 3 Meetings \(live as of [^\n]*\n\n\*\*Kickoff / });
+
+  handler = getFind();
+  calls = installFind(findRouter({
+    search: { "Weekly Roadmap Review": [
+      { id: "m1", title: "Weekly Roadmap Review", structureId: "meeting" },
+      { id: "m2", title: "Weekly Roadmap Review", structureId: "meeting" }
+    ] },
+    objects: { m1: meetingObj("m1", { date: dateProp("2026-07-14T15:00:00.000Z") }), m2: meetingObj("m2", { date: dateProp("2026-07-07T15:00:00.000Z") }) }
+  }));
+  const stage2Res = await handler({ structure: "Meeting", title_hint: "Weekly Roadmap Review", filters: { Date: "2026-07-14" } });
+  assert.equal(fetchedIds(calls).length, 2, "stage 2: both candidates were read");
+  rows.push({ name: "stage 2", res: stage2Res, text: /^Found 1 Meetings matching "Weekly Roadmap Review"[^]*\nID: m1$/m });
+
+  for (const { name, res, text } of rows) {
+    assert.equal(res.isError, undefined, name);
+    assert.equal("structuredContent" in res, false, `${name}: structuredContent must be absent`);
+    assert.equal(res.content.length, 2, `${name}: two content blocks`);
+    assert.equal(res.content[0].type, "text", name);
+    assert.match(res.content[0].text, text, `${name}: content[0] is the human text`);
+    assert.doesNotMatch(res.content[0].text, /seed_method/, `${name}: the JSON stays out of content[0]`);
+    assert.equal(res.content[1].type, "text", name);
+    const parsed = JSON.parse(res.content[1].text);
+    assert.deepEqual(Object.keys(parsed).sort(), keys, `${name}: exactness keys`);
+    assert.equal(res.content[1].text, JSON.stringify(parsed), `${name}: compact, no prefix`);
+  }
 });
 
 test("find_objects: a 429 on page 1 is PARTIAL, never 'No … found' (rate-stop poisons exactness)", async () => {
@@ -797,7 +849,7 @@ test("find_objects: a 429 on page 1 is PARTIAL, never 'No … found' (rate-stop 
   const text = res.content[0].text;
   assert.doesNotMatch(text, /No Meetings found/);
   assert.match(text, /^Note: rate limit reached while listing — read 0 page\(s\) before stopping/m);
-  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(exactnessOf(res).seed_complete, false);
 });
 
 test("find_objects: a non-JSON page (HTML 200) is PARTIAL, never 'No … found'", async () => {
@@ -809,7 +861,7 @@ test("find_objects: a non-JSON page (HTML 200) is PARTIAL, never 'No … found'"
   assert.doesNotMatch(text, /No Meetings found/);
   assert.match(text, /^Note: listing stopped after 0 page\(s\) because a page could not be read/m);
   assert.equal(enumCalls(calls).length, 1);
-  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(exactnessOf(res).seed_complete, false);
 });
 
 test("find_objects: tag only — resolves the NAME by a RootTag-scoped search, enumerates the tag, keeps only this structure", async () => {
@@ -834,7 +886,7 @@ test("find_objects: tag only — resolves the NAME by a RootTag-scoped search, e
   assert.match(text, /^Found 2 Meetings tagged "product" \(live as of /);
   assert.ok(text.includes(`ID: ${uid(1)}`) && text.includes(`ID: ${uid(3)}`));
   assert.ok(!text.includes(`ID: ${uid(2)}`), "a tagged Page is not a Meeting");
-  assert.equal(res.structuredContent.seed_method, "tag-enumeration");
+  assert.equal(exactnessOf(res).seed_method, "tag-enumeration");
 });
 
 test("find_objects: tag + title filters the tag listing client-side and issues NO title search", async () => {
@@ -855,7 +907,7 @@ test("find_objects: tag + title filters the tag listing client-side and issues N
   assert.match(text, /^Found 2 Meetings tagged "product" with a title matching "roadmap" \(live as of /);
   assert.ok(text.includes(`ID: ${uid(1)}`) && text.includes(`ID: ${uid(4)}`));
   assert.ok(!text.includes(`ID: ${uid(3)}`));
-  assert.equal(res.structuredContent.seed_method, "tag-enumeration");
+  assert.equal(exactnessOf(res).seed_method, "tag-enumeration");
 });
 
 test("find_objects: unknown / ambiguous / truncated tag each error distinctly and issue NO enumeration call", async () => {
@@ -907,7 +959,7 @@ test("find_objects: a resolved tag with no objects is a genuine none; the tag pa
   }));
   let res = await handler({ structure: "Meeting", tag: "product" });
   assert.match(res.content[0].text, /^No Meetings found tagged "product" \(live as of /);
-  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(res).seed_complete, true);
 
   handler = getFind();
   const calls = installFind(enumRouter({
@@ -917,7 +969,7 @@ test("find_objects: a resolved tag with no objects is a genuine none; the tag pa
   res = await handler({ structure: "Meeting", tag: "product", page_budget: 2 });
   assert.equal(enumCalls(calls).length, 2);
   assert.match(res.content[0].text, /^Note: listing stopped at the page budget/m);
-  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(exactnessOf(res).seed_complete, false);
 });
 
 test("find_objects: seed_complete and candidates_complete are independent — a complete seed over a truncated fetch", async () => {
@@ -926,14 +978,14 @@ test("find_objects: seed_complete and candidates_complete are independent — a 
   installFind(findRouter({ search: { Note: three } }));
   let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: SORT_DATE_DESC });
   assert.deepEqual(
-    { ...res.structuredContent },
+    { ...exactnessOf(res) },
     { seed_method: "search", seed_complete: true, candidates_complete: false, seed_size: 3, considered: 2, errored: 0, matched: 2, returned: 2 }
   );
   // Known-positive: the same call with room to fetch everything is complete on both axes.
   installFind(findRouter({ search: { Note: three } }));
   res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 30, sort: SORT_DATE_DESC });
-  assert.equal(res.structuredContent.candidates_complete, true);
-  assert.equal(res.structuredContent.considered, 3);
+  assert.equal(exactnessOf(res).candidates_complete, true);
+  assert.equal(exactnessOf(res).considered, 3);
 });
 
 test("find_objects: a candidate that errors in stage 2 makes candidates_complete false", async () => {
@@ -943,9 +995,9 @@ test("find_objects: a candidate that errors in stage 2 makes candidates_complete
     getFail: { m2: { status: 404, text: "gone" } }
   }));
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
-  assert.equal(res.structuredContent.candidates_complete, false);
-  assert.equal(res.structuredContent.errored, 1);
-  assert.equal(res.structuredContent.considered, 2, "considered counts the errored one");
+  assert.equal(exactnessOf(res).candidates_complete, false);
+  assert.equal(exactnessOf(res).errored, 1);
+  assert.equal(exactnessOf(res).considered, 2, "considered counts the errored one");
 });
 
 // === cap-i93 Task 5 fix round ===============================================
@@ -992,9 +1044,9 @@ test("find_objects: a stage-2 rate stop makes candidates_complete false (I2)", a
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
   assert.equal(res.isError, undefined);
   assert.match(res.content[0].text, /^Note: rate budget reached — checked 1 of 3 candidates/m);
-  assert.equal(res.structuredContent.candidates_complete, false);
-  assert.equal(res.structuredContent.considered, 1);
-  assert.equal(res.structuredContent.seed_size, 3);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+  assert.equal(exactnessOf(res).considered, 1);
+  assert.equal(exactnessOf(res).seed_size, 3);
 });
 
 test("find_objects: a listing that fails on page 2 keeps and shows page 1's rows (M1)", async () => {
@@ -1005,8 +1057,8 @@ test("find_objects: a listing that fails on page 2 keeps and shows page 1's rows
   const text = res.content[0].text;
   for (let n = 1; n <= 10; n++) assert.ok(text.includes(`ID: ${uid(n)}`), `row ${n} shown`);
   assert.match(text, /^Note: listing stopped after 1 page\(s\) because a page could not be read/m);
-  assert.equal(res.structuredContent.seed_complete, false);
-  assert.equal(res.structuredContent.seed_size, 10);
+  assert.equal(exactnessOf(res).seed_complete, false);
+  assert.equal(exactnessOf(res).seed_size, 10);
 });
 
 test("find_objects: a tag over 512 characters errors before any call; 512 passes the guard (M2)", async () => {
@@ -1034,16 +1086,16 @@ test("find_objects: a RAW seed of 49 does not escalate; 50 does (>=, judged befo
   let calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 49) } }, structurePages: { meeting: pagesOf(listing) } }));
   let res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
   assert.equal(enumCalls(calls).length, 0, "49 is an exact seed");
-  assert.equal(res.structuredContent.seed_method, "search");
-  assert.equal(res.structuredContent.seed_size, 49);
+  assert.equal(exactnessOf(res).seed_method, "search");
+  assert.equal(exactnessOf(res).seed_size, 49);
 
   handler = getFind(fakeClock());
   calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 50) } }, structurePages: { meeting: pagesOf(listing) } }));
   res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
   assert.equal(enumCalls(calls).length, 1, "50 escalates");
-  assert.equal(res.structuredContent.seed_method, "search+enumeration");
-  assert.equal(res.structuredContent.seed_size, 60);
-  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration");
+  assert.equal(exactnessOf(res).seed_size, 60);
+  assert.equal(exactnessOf(res).seed_complete, true);
 });
 
 test("find_objects: a COMPLETED escalation emits no Note, says it listed instead, and drops the semantic-extras line", async () => {
@@ -1058,7 +1110,7 @@ test("find_objects: a COMPLETED escalation emits no Note, says it listed instead
   assert.match(text, /^\(The title search returned its 50-result maximum, so the Meetings were listed instead: 1 page\(s\), 35 summaries\.\)$/m);
   assert.doesNotMatch(text, /^[ \t]*Note:/im, "a completed escalation is complete (U8, mutation x)");
   assert.doesNotMatch(text, /were ignored/, "the dropped-count line belongs to the search path only (U8)");
-  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(res).seed_complete, true);
 });
 
 test("find_objects: an escalation that hits the page budget is partial with a stage-1 Note", async () => {
@@ -1067,8 +1119,8 @@ test("find_objects: an escalation that hits the page budget is partial with a st
   installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 50) } }, structurePages: { meeting: pagesOf(listing) } }));
   const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 2 });
   assert.match(res.content[0].text, /^Note: listing stopped at the page budget — read 2 pages \(200 summaries\)/m);
-  assert.equal(res.structuredContent.seed_complete, false);
-  assert.equal(res.structuredContent.seed_size, 200);
+  assert.equal(exactnessOf(res).seed_complete, false);
+  assert.equal(exactnessOf(res).seed_size, 200);
 });
 
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
@@ -1120,7 +1172,7 @@ test("find_objects canary (U4): silent on a rate-stopped and on an unreadable li
     const handler = getFind();
     installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pages } }));
     const r = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" }));
-    assert.equal(r.value.structuredContent.seed_complete, false, `${name}: the listing really was partial`);
+    assert.equal(exactnessOf(r.value).seed_complete, false, `${name}: the listing really was partial`);
     assert.match(r.value.content[0].text, new RegExp(`^\\(The title search returned its 50-result maximum, so the Meetings were listed instead: ${pagesRead} page\\(s\\), `, "m"), `${name}: pages read`);
     assert.deepEqual(r.lines, [], `${name}: all 20 title matches look missing here, and none may be reported`);
   }
@@ -1137,8 +1189,8 @@ test("find_objects: an ESCALATED title search whose partial listing has zero mat
   assert.match(text, /^Found 0 Meetings matching "Roadmap"/);
   assert.match(text, /^\(no matching Meetings in the part of the listing that was read\)$/m);
   assert.match(text, /^Note: listing stopped at the page budget — read 1 pages \(100 summaries\)/m);
-  assert.equal(res.structuredContent.seed_method, "search+enumeration");
-  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration");
+  assert.equal(exactnessOf(res).seed_complete, false);
 });
 
 test("find_objects: every title-filtering path uses the shared matcher — an accented title meets an unaccented hint on all three paths (U2, QA B6)", async () => {
@@ -1213,13 +1265,13 @@ test("find_objects: no filters and no sort → ZERO GET /object, most recent fir
   assert.match(text, /^Found 30 Meetings \(live as of /);
   assert.equal(text.match(/^ID: (\S+)$/m)![1], uid(40), "the newest title date is listed first");
   assert.match(text, /^Note: showing the first 30 of 40 matching Meetings \(limit\) — raise limit or narrow the seed\.$/m);
-  assert.equal(res.structuredContent.candidates_complete, false);
-  assert.equal(res.structuredContent.returned, 30);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+  assert.equal(exactnessOf(res).returned, 30);
   // D3 on the zero-GET path: every candidate "matches" (no filters), so matched is the
   // whole seed and the cut shows as matched 40 vs returned 30; nothing was read or errored.
-  assert.equal(res.structuredContent.matched, 40);
-  assert.equal(res.structuredContent.considered, 40);
-  assert.equal(res.structuredContent.errored, 0);
+  assert.equal(exactnessOf(res).matched, 40);
+  assert.equal(exactnessOf(res).considered, 40);
+  assert.equal(exactnessOf(res).errored, 0);
 
   // limit governs the cap; a cap that does not bite is complete.
   handler = getFind();
@@ -1228,13 +1280,13 @@ test("find_objects: no filters and no sort → ZERO GET /object, most recent fir
   text = res.content[0].text;
   assert.match(text, /^Found 40 Meetings/);
   assert.doesNotMatch(text, /^[ \t]*Note:/im);
-  assert.equal(res.structuredContent.candidates_complete, true);
+  assert.equal(exactnessOf(res).candidates_complete, true);
   // A full answer: both flags true AND matched === returned (D3).
-  assert.equal(res.structuredContent.seed_complete, true);
-  assert.equal(res.structuredContent.returned, 40);
-  assert.equal(res.structuredContent.matched, res.structuredContent.returned);
-  assert.equal(res.structuredContent.considered, 40);
-  assert.equal(res.structuredContent.errored, 0);
+  assert.equal(exactnessOf(res).seed_complete, true);
+  assert.equal(exactnessOf(res).returned, 40);
+  assert.equal(exactnessOf(res).matched, exactnessOf(res).returned);
+  assert.equal(exactnessOf(res).considered, 40);
+  assert.equal(exactnessOf(res).errored, 0);
 
   // Known-positive: with a sort, stage 2 runs and the GET channel is live.
   // Fake clock: 30 GETs equals the object window, so on a real clock an
@@ -1296,9 +1348,9 @@ test("find_objects: a stage-2 limit slice is informational, not a Note, keeps ca
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC, limit: 1 });
   assert.match(res.content[0].text, /^\(showing 1 of 3 matches — limit\)$/m);
   assert.doesNotMatch(res.content[0].text, /^[ \t]*Note:/im);
-  assert.equal(res.structuredContent.candidates_complete, true);
-  assert.equal(res.structuredContent.matched, 3, "matches after filtering, BEFORE the limit slice");
-  assert.equal(res.structuredContent.returned, 1);
+  assert.equal(exactnessOf(res).candidates_complete, true);
+  assert.equal(exactnessOf(res).matched, 3, "matches after filtering, BEFORE the limit slice");
+  assert.equal(exactnessOf(res).returned, 1);
 });
 
 test("find_objects: when titles carry no dates and rows were cut, an info line says the kept rows are in listing order (design § Stage 2 (b))", async () => {
@@ -1348,7 +1400,7 @@ test("find_objects: the undated listing-order line never appears on the plain ti
   let handler = getFind();
   installFind(findRouter({ search: { Note: five } }));
   let res = await handler({ structure: "Meeting", title_hint: "Note", limit: 2 });
-  assert.equal(res.structuredContent.seed_method, "search");
+  assert.equal(exactnessOf(res).seed_method, "search");
   assert.match(res.content[0].text, /^\(showing 2 of 5 matches — limit\)$/m);
   assert.doesNotMatch(res.content[0].text, /carries a date/);
   // Stage-2 cut by fetch_cap.
@@ -1370,7 +1422,7 @@ test("find_objects: unreadable candidates are never counted as read — the samp
   assert.match(text, /^\(none of the 1 candidate read matched the filters — 2 could not be read, 2 were not fetched\)$/m);   // singular
   assert.match(text, /^Note: 2 candidate\(s\) could not be read and were skipped\.$/m);
   assert.match(text, /^Note: fetched the first 3 of 5 candidates \(fetch_cap\)/m);
-  assert.equal(res.structuredContent.errored, 2);
+  assert.equal(exactnessOf(res).errored, 2);
   // Caveat on the same fixture, sorted: the order holds over the ONE candidate read.
   handler = getFind();
   installFind(findRouter({ search: { Note: five }, getFail }));
@@ -1430,7 +1482,7 @@ test("find_objects: without stage 2 nothing is reserved for fetches, and default
   let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
   let res = await handler({ structure: "Meeting", page_budget: 25 });          // short-circuit
   assert.equal(enumCalls(calls).length, 20, "page_budget 25 honoured in full");
-  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(res).seed_complete, true);
   assert.doesNotMatch(res.content[0].text, /clamped/);
 
   // Fake clock: these GETs equal the object window, so a real clock would turn an
@@ -1453,7 +1505,7 @@ test("find_objects: a plain title search that does NOT escalate keeps today's be
   assert.equal(fetchedIds(calls).length, 49, "fetch_cap 50 honoured: every candidate fetched");
   assert.deepEqual(clock.sleeps, [60000], "the object bucket's own wait paces the 31st GET");
   assert.doesNotMatch(res.content[0].text, /per-call request budget/);
-  assert.equal(res.structuredContent.candidates_complete, true);
+  assert.equal(exactnessOf(res).candidates_complete, true);
 });
 
 // Meeting plus six more relation properties, so a call can carry six relation filters.
@@ -1703,11 +1755,16 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
     for (const line of text.split("\n").filter(l => PA_COUNTS_RE.test(l))) {
       assert.ok(line.startsWith("Note: rate budget reached — checked "), `${row.name}: count phrase outside the rate Note: ${line}`);
       const m = line.match(PA_COUNTS_RE)!;
-      assert.deepEqual([Number(m[1]), Number(m[2])], [row.res.structuredContent.considered, row.res.structuredContent.seed_size], `${row.name}: N/M`);
+      assert.deepEqual([Number(m[1]), Number(m[2])], [exactnessOf(row.res).considered, exactnessOf(row.res).seed_size], `${row.name}: N/M`);
     }
     // PA's verdict agrees with the structured exactness on every shape.
-    const sc = row.res.structuredContent;
-    assert.equal(paIncomplete(text), !(sc.seed_complete && sc.candidates_complete), `${row.name}: PA verdict vs structuredContent`);
+    const sc = exactnessOf(row.res);
+    assert.equal(paIncomplete(text), !(sc.seed_complete && sc.candidates_complete), `${row.name}: PA verdict vs the exactness block`);
+    // PA reads content[0] today; the JSON block must not trip its parser either,
+    // in case a consumer ever joins every text block (cap-ul0).
+    const json = row.res.content[1].text as string;
+    assert.doesNotMatch(json, PA_NOTE_RE, `${row.name}: content[1] carries no Note: line`);
+    assert.doesNotMatch(json, PA_COUNTS_RE, `${row.name}: content[1] carries no count phrase`);
   }
 
   const canaryRow = complete[complete.length - 1];
@@ -1744,9 +1801,9 @@ test("find_objects: a PARTIAL escalation still returns every title match its own
     for (const w of WEEKLY) assert.ok(text.includes(`ID: ${w.id}`), `${name}: ${w.title} returned`);
     assert.ok(!text.includes(uid(6001)), `${name}: a semantic extra is still not a candidate`);
     assert.match(text, note, `${name}: the stage-1 Note stays`);
-    assert.equal(res.structuredContent.seed_method, "search+enumeration", name);
-    assert.equal(res.structuredContent.seed_complete, false, `${name}: the listing really was partial`);
-    assert.equal(res.structuredContent.seed_size, 45, `${name}: seed_size counts the union`);
+    assert.equal(exactnessOf(res).seed_method, "search+enumeration", name);
+    assert.equal(exactnessOf(res).seed_complete, false, `${name}: the listing really was partial`);
+    assert.equal(exactnessOf(res).seed_size, 45, `${name}: seed_size counts the union`);
   }
 });
 
@@ -1763,7 +1820,7 @@ test("find_objects: a PARTIAL escalation with a sort GETs the search's title mat
     assert.ok(got.every(id => want.has(id)), `${name}: every GET is a search title match`);
     assert.match(res.content[0].text, note, name);
     assert.match(res.content[0].text, /^Note: fetched the first 30 of 45 candidates \(fetch_cap\)/m, name);
-    assert.equal(res.structuredContent.seed_size, 45, name);
+    assert.equal(exactnessOf(res).seed_size, 45, name);
   }
 });
 
@@ -1776,10 +1833,10 @@ test("find_objects: a COMPLETE listing missing a search title match still return
   installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
   const r = await captureStderr<any>(() => handler({ structure: "Meeting", title_hint: "Retro" }));
   const text = r.value.content[0].text;
-  assert.equal(r.value.structuredContent.seed_complete, true);
+  assert.equal(exactnessOf(r.value).seed_complete, true);
   assert.ok(text.includes(`ID: ${uid(5000)}`), "the hit the listing missed is returned");
   // 25 listed + 1 search-only: Retro 1..20 sit in both and are counted once.
-  assert.equal(r.value.structuredContent.seed_size, 26);
+  assert.equal(exactnessOf(r.value).seed_size, 26);
   assert.match(text, /^Found 26 Meetings matching "Retro"/m);
   assert.equal(r.lines.length, 1, "the canary still reports the disagreement");
   assert.match(r.lines[0], new RegExp(`fidelity canary: 1 .*${uid(5000)}`));
@@ -1797,7 +1854,7 @@ test("find_objects: a caller limit on the zero-GET path gives the SAME completen
     const text = res.content[0].text;
     // Precondition: the two calls really took the two paths.
     assert.equal(fetchedIds(calls).length, name === "no sort" ? 0 : 3, `${name}: path taken`);
-    const sc = res.structuredContent;
+    const sc = exactnessOf(res);
     signals[name] = {
       notes: noteLines(text), limitLine: /^\(showing 2 of 3 matches — limit\)$/m.test(text),
       seed_complete: sc.seed_complete, candidates_complete: sc.candidates_complete, matched: sc.matched, returned: sc.returned
@@ -1812,7 +1869,7 @@ test("find_objects: a caller limit on the zero-GET path gives the SAME completen
   const res = await handler({ structure: "Meeting" });
   assert.match(res.content[0].text, /^Note: showing the first 30 of 40 matching Meetings \(limit\)/m);
   assert.doesNotMatch(res.content[0].text, /^\(showing \d+ of \d+ matches — limit\)$/m);
-  assert.equal(res.structuredContent.candidates_complete, false);
+  assert.equal(exactnessOf(res).candidates_complete, false);
 });
 
 test("find_objects: the page-budget Note offers raising page_budget only below its maximum (M1)", async () => {
@@ -1837,7 +1894,7 @@ test("find_objects: a direct call with a non-finite page_budget or fetch_cap get
   let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
   let res = await handler({ structure: "Meeting", page_budget: NaN });
   assert.equal(enumCalls(calls).length, PAGE_BUDGET_DEFAULT);
-  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(exactnessOf(res).seed_complete, false);
 
   // NaN fetch_cap with a sort: NaN would poison the fetch reserve (pages) and the
   // fetch plan (zero GETs); the default 30 gives 45 - 1 - 30 = 14 pages and 30 GETs.

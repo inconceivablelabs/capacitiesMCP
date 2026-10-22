@@ -41,7 +41,10 @@ const summarize = (r) => {
   const lines = text.split("\n");
   const head = lines[0].match(/^(Found \d+ \w+|No \w+ found)/)?.[1] ?? "<unrecognised first line>";
   const trailer = lines.filter(l => /^Note:/.test(l) || /^\(/.test(l));
-  return { isError: r.isError ?? false, head, trailer, structured: r.structuredContent ?? null };
+  // The exactness fields arrive as content[1] JSON, never structuredContent (cap-ul0).
+  assert.equal(r.structuredContent, undefined, "structuredContent must be absent");
+  const isError = r.isError ?? false;
+  return { isError, head, trailer, structured: isError ? null : JSON.parse(r.content[1].text) };
 };
 const show = (label, s, extra = {}) => {
   console.log(`\n== ${label}`);
