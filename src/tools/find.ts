@@ -49,9 +49,11 @@ export const MAX_ENTITY_FILTERS = 5;
 const FETCH_RESERVE_MAX = 30;
 
 export type SeedMethod = "search" | "search+enumeration" | "tag-enumeration" | "structure-enumeration";
-// Returned as structuredContent on every non-error result, so a caller can tell a
-// genuine none from a partial one without parsing Note: lines. A type alias, not
-// an interface: the SDK's structuredContent needs an implicit index signature.
+// Returned as a second text block of compact JSON (content[1]) on every non-error
+// result, so a caller can tell a genuine none from a partial one without parsing
+// Note: lines. NOT structuredContent: observed 2026-10-22 in Claude Code 2.1.305
+// via mcp-gateway, the model received only the structuredContent JSON and no
+// content[0].text, which hid every id; the layer responsible was not isolated (cap-ul0).
 export type FindExactness = {
   seed_method: SeedMethod;
   seed_complete: boolean;
@@ -62,6 +64,15 @@ export type FindExactness = {
   matched: number;      // matches after filtering, BEFORE the limit slice (D3)
   returned: number;     // rows in the response
 };
+
+// Compact JSON: content[0] stays the human text consumers parse, and JSON of
+// these fields can never form a Note: line or a count phrase. The leading
+// newline is because text blocks were seen joined with no separator (Claude Code
+// 2.1.305 via mcp-gateway, 2026-10-22) — without it the JSON lands on the end of
+// the last text line, which may be a Note:.
+function exactnessBlock(exactness: FindExactness): { type: "text"; text: string } {
+  return { type: "text", text: "\n" + JSON.stringify(exactness) };
+}
 
 const ERROR_DETAIL_MAX = 200;
 
@@ -503,7 +514,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         "{after,before}; a label is an option NAME; a " +
         "relation/tag is an object NAME; text/number/boolean are equals. `sort` is {by, order}; missing " +
         "values sort last. A line starting \"Note:\" means the result may be incomplete; `seed_complete` and " +
-        "`candidates_complete` say which part, and it is the full answer only when both are true and " +
+        "`candidates_complete` (in the result's second text block, a JSON object) say which part, and it is the full answer only when both are true and " +
         "`matched` equals `returned`. Returns ids + titles + filtered/sorted values, NO bodies (use " +
         "get_object); cannot follow backlinks.",
       inputSchema: {
@@ -697,7 +708,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             seed_method: seedMethod, seed_complete: true, candidates_complete: true,
             seed_size: 0, considered: 0, errored: 0, matched: 0, returned: 0
           };
-          return { content: [{ type: "text", text: noneText(stamp) }], structuredContent: exactness };
+          return { content: [{ type: "text", text: noneText(stamp) }, exactnessBlock(exactness)] };
         }
 
         // A listing has no useful order of its own, so put the most recent title
@@ -752,7 +763,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             returned: rows.length
           };
           const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
-          return { content: [{ type: "text", text: `${header(rows.length, stamp)}\n\n${body}${noteLine}` }], structuredContent: exactness };
+          return { content: [{ type: "text", text: `${header(rows.length, stamp)}\n\n${body}${noteLine}` }, exactnessBlock(exactness)] };
         }
 
         // 4. Fetch candidates (object bucket, paced) — one GET /object per
@@ -857,7 +868,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           matched: matchedCount,
           returned: matches.length
         };
-        return { content: [{ type: "text", text: `${header(matches.length, stamp)}\n\n${body}${noteLine}` }], structuredContent: exactness };
+        return { content: [{ type: "text", text: `${header(matches.length, stamp)}\n\n${body}${noteLine}` }, exactnessBlock(exactness)] };
       } catch (error) {
         const message = error instanceof CapacitiesAPIError ? error.message : error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: `Failed to find objects: ${message}` }], isError: true };
