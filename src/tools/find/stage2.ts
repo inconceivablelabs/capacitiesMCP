@@ -1,0 +1,87 @@
+// File: src/tools/find/stage2.ts
+//
+// find_objects stage 2 (split out of find.ts, cap-0ot): one GET /object per
+// candidate, then client-side filter and sort over the typed property values.
+import { CapacitiesClient, CapacitiesAPIError, WaitBudget } from "../../client/capacities.js";
+import { CompiledFilter, CompiledSort, matchesFilter, sortKey, compareForSort } from "./query.js";
+import { Candidate, briefError } from "./shared.js";
+
+// Stage 2 stops after this many read errors in a row (cap-fvb).
+const MAX_CONSECUTIVE_READ_ERRORS = 3;
+
+export type Fetched = { id: string; title: string; props: Record<string, any> };
+
+export interface FetchOutcome {
+  fetched: Fetched[];
+  rateStopped: boolean;
+  erroredCount: number;
+  breakerStop: string | null;   // why the circuit breaker tripped, when it did
+}
+
+/**
+ * Reads the first `planned` candidates in order. Fail-open: a rate stop ends the
+ * loop with partial results; a non-rate read error skips the candidate and
+ * continues, unless the circuit breaker trips.
+ */
+export async function fetchCandidates(
+  client: CapacitiesClient,
+  candidates: Candidate[],
+  planned: number,
+  budget: WaitBudget
+): Promise<FetchOutcome> {
+  const fetched: Fetched[] = [];
+  let rateStopped = false;
+  let erroredCount = 0;
+  // Circuit breaker (cap-fvb): a Cloudflare ban can arrive as a 403, and every
+  // further GET extends an IP-level ban shared by every client on our egress.
+  // Stop at once on a 403 (or a 401), or after a run of read failures that only
+  // a success resets. A 404 is the per-object case (a deleted candidate), so it
+  // neither advances nor resets the run (M3); anything else — another 4xx, a
+  // 5xx, a network error — advances it, since a 400 or 410 on every GET is
+  // systemic, e.g. an API sunset (cap-fvb delta D4).
+  let consecutiveErrors = 0;
+  let breakerStop: string | null = null;
+  for (let i = 0; i < planned; i++) {
+    const cand = candidates[i];
+    try {
+      const obj = await client.getObject(cand.id, budget);
+      fetched.push({ id: cand.id, title: cand.title, props: (obj.properties ?? {}) as Record<string, any> });
+      consecutiveErrors = 0;
+    } catch (e) {
+      if (e instanceof CapacitiesAPIError && e.code === "RATE_LIMIT_EXCEEDED") { rateStopped = true; break; }
+      erroredCount++;
+      const status = e instanceof CapacitiesAPIError ? e.details?.status : undefined;
+      if (status !== 404) consecutiveErrors++;
+      const detail = briefError(e instanceof Error ? e.message : String(e));
+      // A 401 mid-loop (token revoked) fails every remaining GET the same way.
+      if (status === 403 || status === 401) {
+        breakerStop = `a ${status} from the server (${detail})`;
+        break;
+      }
+      if (consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS) {
+        breakerStop = `${consecutiveErrors} read errors with no successful read between them, not counting not-found (${detail})`;
+        break;
+      }
+    }
+  }
+  return { fetched, rateStopped, erroredCount, breakerStop };
+}
+
+/** Filter, sort (missing last), then the post-filter limit. `matchedCount` is before the slice (D3). */
+export function filterAndSort(
+  fetched: Fetched[],
+  compiled: CompiledFilter[],
+  compiledSort: CompiledSort | null,
+  limit: number | undefined
+): { matches: Fetched[]; matchedCount: number } {
+  let matches = fetched.filter(f => compiled.every(cf => matchesFilter(f.props, cf)));
+  if (compiledSort) {
+    const cs = compiledSort;
+    matches = matches.slice().sort((a, b) =>
+      compareForSort(sortKey(a.props[cs.propId]), sortKey(b.props[cs.propId]), cs.order)
+    );
+  }
+  const matchedCount = matches.length;
+  if (limit !== undefined) matches = matches.slice(0, limit);
+  return { matches, matchedCount };
+}

@@ -1,5 +1,6 @@
 
 // File: src/client/capacities.ts - Using native fetch
+import { errorBodyText, isJsonDocument } from "../utils/error-text.js";
 import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject, ObjectPage } from "./types.js";
 
 // Rate-limit window length (ms). Exported so composite-write callers can seed a
@@ -8,6 +9,12 @@ export const WINDOW_MS = 60000;
 
 // Page size for GET /objects/structure|tag enumeration (the API maximum).
 export const ENUMERATE_PAGE_SIZE = 100;
+
+// Wording of Cloudflare's 1015 rate-limit / temporary-ban page (cap-dnf review I1).
+// Bounded quantifiers: the unbounded form backtracks O(n^3) on "error" + a long
+// whitespace run. Only the first BAN_SNIFF_MAX chars of a body are tested (D1).
+const CLOUDFLARE_BAN = /error(?:\s{0,3}code)?\s{0,3}:?\s{0,3}1015\b|you are being rate limited|banned you temporarily/i;
+const BAN_SNIFF_MAX = 8192;
 export type EnumerationKind = "structure" | "tag";
 
 // A mutable, operation-level bounded-wait budget. A single instance is shared
@@ -75,25 +82,36 @@ export class CapacitiesClient {
       } catch {
         /* ignore */
       }
+      // The message is echoed into tool output, so it carries a shaped body
+      // (JSON kept, anything else cut to one line); details.body stays raw (cap-dnf).
+      const shown = errorBodyText(body);
 
-      if (response.status === 429) {
+      // A hard Cloudflare ban can arrive as a 403. The shaped body no longer
+      // carries its wording, and consumers (personal-assistant) classify by
+      // "rate limit" in the message — so classify here. ONLY a 403 is sniffed:
+      // every other status keeps its class, because PA keys "may have applied"
+      // on "API error 5…" and would retry a non-idempotent write it saw as a
+      // rate limit (D2). A JSON body is an app error, never a Cloudflare page.
+      const cloudflareBan = response.status === 403 && !isJsonDocument(body) &&
+        CLOUDFLARE_BAN.test(body.slice(0, BAN_SNIFF_MAX));
+      if (response.status === 429 || cloudflareBan) {
         const retryAfter = response.headers.get("retry-after");
         throw new CapacitiesAPIError(
           "RATE_LIMIT_EXCEEDED",
-          "Rate limit exceeded" + (body ? `: ${body}` : ""),
-          { status: 429, body, ...(retryAfter ? { retryAfter } : {}) }
+          "Rate limit exceeded" + (shown ? `: ${shown}` : ""),
+          { status: response.status, body, ...(retryAfter ? { retryAfter } : {}) }
         );
       }
       if (response.status === 401) {
         throw new CapacitiesAPIError(
           "AUTHENTICATION_FAILED",
-          "Invalid API token" + (body ? `: ${body}` : ""),
+          "Invalid API token" + (shown ? `: ${shown}` : ""),
           { status: 401, body }
         );
       }
       throw new CapacitiesAPIError(
         "API_ERROR",
-        `API error ${response.status}${body ? ": " + body : ""}`,
+        `API error ${response.status}${shown ? ": " + shown : ""}`,
         { status: response.status, body }
       );
     }

@@ -1609,3 +1609,14 @@ test("create_object refuses a relation whose title search hit the 50-cap with no
   assert.match(res.content[0].text, /50 results/);
   assert.equal(created, false, "fail-before-create: nothing written when a relation is unconfirmable");
 });
+
+// --- cap-dnf: a JSON 400 body still reaches the LLM whole ------------------
+
+test("create: a multi-line JSON 400 body is surfaced intact in isError text (cap-dnf)", async () => {
+  const { handler } = getCreateObject();
+  const json = JSON.stringify({ error: "cap_invalid_input", issues: [{ path: "properties.status", message: "expected label option id" }] }, null, 2);
+  installFetch(router({ createFail: { status: 400, text: json } }));
+  const res = await handler({ structure_id: "RootTask", title: "T", create_missing_relations: false });
+  assert.equal(res.isError, true);
+  assert.ok(res.content[0].text.includes(json), res.content[0].text);
+});

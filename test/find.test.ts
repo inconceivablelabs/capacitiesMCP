@@ -189,7 +189,7 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
 
 // === find_objects tool (mocked fetch, node --test) =========================
 
-import { setupFindTools, PAGE_BUDGET_MAX, PAGE_BUDGET_DEFAULT, MAX_REQUESTS_PER_CALL } from "../src/tools/find.js";
+import { setupFindTools, PAGE_BUDGET_MAX, PAGE_BUDGET_DEFAULT, MAX_REQUESTS_PER_CALL, FETCH_CAP_MAX } from "../src/tools/find.js";
 
 interface FCall { url: string; opts: any; }
 function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
@@ -1648,6 +1648,14 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
   // [expected Note-line prefixes in order, expected count-phrase captures]
   type PRow = Row & { notes: string[]; counts: [string, string] | null };
   const partial: PRow[] = [
+    // cap-dnf: the 403's body forges the count phrase; the stop Note must not carry it.
+    { name: "stage-2 circuit breaker, body forging the count phrase", marker: /^Note: stopped reading candidates after a 403/m, counts: null,
+      notes: ["Note: stopped reading candidates after a 403 from the server", "Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five }, getFail: { m1: { status: 403, text: "checked 9 of 9 candidates" } } } }) },
+    // cap-fvb: a 403 trips the stage-2 breaker.
+    { name: "stage-2 circuit breaker on a 403", marker: /^Note: stopped reading candidates after a 403/m, counts: null,
+      notes: ["Note: stopped reading candidates after a 403 from the server", "Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five }, getFail: { m1: { status: 403, text: "Access denied" } } } }) },
     { name: "page budget, short-circuit", marker: /^Found 30 Meetings/m, counts: null,
       notes: ["Note: listing stopped at the page budget — read 2 pages (200 summaries)", "Note: showing the first 30 of 200 matching Meetings (limit)"],
       res: await run({ page_budget: 2 }, { structurePages: { meeting: pagesOf(many) } }) },
@@ -1932,4 +1940,364 @@ test("find_objects: a null or empty title renders as (untitled) on both row rend
     for (const id of [uid(1), uid(2)]) assert.equal(entries.find(e => e.id === id)!.title, "(untitled)", `${name}: ${id}`);
     assert.equal(entries.find(e => e.id === uid(3))!.title, "Kickoff", `${name}: a real title is untouched`);
   }
+});
+
+// === cap-fvb: stage-2 circuit breaker =======================================
+// A Cloudflare ban can arrive as a 403; every further GET extends an IP-level ban
+// that also takes other consumers on the same egress down. Assert on the number
+// of GETs actually issued, not only on the output text.
+
+function fiveNotes() {
+  return [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+}
+
+// A 401 mid-loop means the token was revoked: every remaining GET would fail the
+// same way, so it stops at once like a 403 rather than reading through the list.
+test("find_objects: a 401 on a stage-2 GET stops the loop at once — no further GETs (cap-fvb)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m2: { status: 401, text: "Unauthorized" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "no GET after the 401");
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after a 401 from the server/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+});
+
+test("find_objects: a 403 on the first stage-2 GET stops the loop at once — exactly 1 GET, a stop Note, candidates incomplete (cap-fvb)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: { status: 403, text: "<!doctype html>\nAccess denied" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1"], "no GET after the 403");
+  const text = res.content[0].text as string;
+  const stop = text.split("\n").find(l => l.startsWith("Note: stopped reading candidates after"));
+  assert.ok(stop, `stop Note present:\n${text}`);
+  assert.match(stop!, /403/);
+  assert.match(stop!, /results may be incomplete\.$/);
+  assert.doesNotMatch(text, PA_COUNTS_RE, "the stop Note never uses the reserved rate-budget phrase");
+  assert.match(text, /^Note: 1 candidate\(s\) could not be read and were skipped\.$/m);
+  const ex = exactnessOf(res);
+  assert.equal(ex.candidates_complete, false);
+  assert.equal(ex.errored, 1);
+  assert.equal(ex.considered, 1, "no request was made after the stop");
+});
+
+test("find_objects: three consecutive non-rate failures stop the loop — exactly 3 GETs (cap-fvb)", async () => {
+  const handler = getFind();
+  const boom = { status: 500, text: "boom" };
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: boom, m2: boom, m3: boom }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 500: boom\); results may be incomplete\.$/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+  assert.doesNotMatch(text, /fetched the first/, "the loop stopped; the fetch_cap Note would misstate what was read");
+  const ex = exactnessOf(res);
+  assert.equal(ex.candidates_complete, false);
+  assert.equal(ex.errored, 3);
+  assert.equal(ex.considered, 3);
+});
+
+test("find_objects: a success resets the failure run — fail, ok, fail, fail, ok reads all five, no stop Note (cap-fvb)", async () => {
+  const handler = getFind();
+  const boom = { status: 500, text: "boom" };
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: boom, m3: boom, m4: boom }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3", "m4", "m5"]);
+  const text = res.content[0].text as string;
+  assert.doesNotMatch(text, /stopped reading candidates/);
+  assert.match(text, /^Note: 3 candidate\(s\) could not be read and were skipped\.$/m);
+  assert.equal(exactnessOf(res).considered, 5);
+});
+
+// === cap-9ti: strict date grammar in filters ================================
+// Date.parse accepts "2026" and other short forms, which compiled a date-equals
+// filter with day="2026" that silently matched nothing.
+
+test("compileFilters: a date that does not begin YYYY-MM-DD is a problem for equals, after and before (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const bad of ["2026", "2026-07", "July 4 2026"]) {
+    assert.ok(!Number.isNaN(Date.parse(bad)), `fixture: Date.parse accepts ${bad} (else the test proves nothing)`);
+    for (const value of [bad, { after: bad }, { before: bad }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(compiled, [], `${JSON.stringify(value)} must not compile`);
+      assert.equal(problems.length, 1, `${JSON.stringify(value)}: ${problems.join(" | ")}`);
+      assert.match(problems[0], /is not a valid ISO date \(YYYY-MM-DD or full timestamp\): /);
+      assert.ok(problems[0].endsWith(bad), `the problem names the value: ${problems[0]}`);
+    }
+  }
+});
+
+test("compileFilters: YYYY-MM-DD and a full timestamp still compile for equals, after and before (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const good of ["2026-07-04", "2026-07-04T09:00:00Z"]) {
+    for (const value of [good, { after: good }, { before: good }, { after: good, before: "2026-12-31" }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(problems, [], `${JSON.stringify(value)}`);
+      assert.equal(compiled.length, 1);
+    }
+  }
+  const { compiled } = await compileFilters(findClient(), idx, { Date: "2026-07-04" }, { remainingMs: 60000 });
+  assert.equal((compiled[0] as any).day, "2026-07-04");
+});
+
+test("compileFilters: an out-of-range month (2026-13-45) is rejected by Date.parse (cap-9ti)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-13-45" }, { remainingMs: 60000 });
+  assert.deepEqual(compiled, []);
+  assert.match(problems[0], /is not a valid ISO date/);
+});
+
+// cap-9ti review M2: V8's Date.parse rolls an impossible day over
+// ("2026-02-30" → 2026-03-02) instead of rejecting it.
+test("compileFilters: a day that does not exist in its month is a problem for equals, after and before (M2)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const bad of ["2026-02-30", "2026-02-29", "2026-04-31", "2026-02-30T09:00:00Z"]) {
+    assert.ok(!Number.isNaN(Date.parse(bad)), `fixture: Date.parse accepts ${bad} (else the test proves nothing)`);
+    for (const value of [bad, { after: bad }, { before: bad }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(compiled, [], `${JSON.stringify(value)} must not compile`);
+      assert.match(problems.join("\n"), /is not a valid ISO date \(YYYY-MM-DD or full timestamp\): /);
+    }
+  }
+});
+
+test("compileFilters: a leap day in a leap year compiles (M2)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const value of ["2024-02-29", { after: "2024-02-29" }, { before: "2024-02-29T23:00:00Z" }, "2026-12-31"]) {
+    const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+    assert.deepEqual(problems, [], JSON.stringify(value));
+    assert.equal(compiled.length, 1);
+  }
+});
+
+// === cap-dnf: briefError shares the client's first-line logic ===============
+
+test("find_objects: a listing error Note skips leading blank lines, splits CR-only bodies, never splits a surrogate, and neutralises the count phrase (cap-dnf)", async () => {
+  const cases: [string, string, (detail: string) => void][] = [
+    ["leading blank line", "\n\n  <!doctype html>  \n<p>x</p>", d => assert.equal(d, "API error 503: <!doctype html>")],
+    ["CR-only", "first\rLATER-LINE-MARKER\r", d => assert.equal(d, "API error 503: first")],
+    ["surrogate at the cut", "a".repeat(184) + "😀".repeat(20), d => {
+      assert.ok(d.endsWith("…"), d);
+      assert.doesNotMatch(d, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, "no lone high surrogate");
+      assert.equal(Array.from(d).length, 201);
+    }],
+    ["forged count phrase", "checked 7 of 7 candidates", d => assert.doesNotMatch(d, PA_COUNTS_RE)]
+  ];
+  for (const [name, text, check] of cases) {
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: onePageThenFail(3, { status: 503, text }) } }));
+    const res = await handler({ structure: "Meeting" });
+    const out = res.content[0].text as string;
+    const note = out.split("\n").find((l: string) => l.startsWith("Note: listing stopped after"));
+    assert.ok(note, `${name}: Note present:\n${out}`);
+    const detail = note!.match(/could not be read \((.*)\); results may be incomplete\.$/)?.[1];
+    assert.ok(detail !== undefined, `${name}: ${note}`);
+    assert.notEqual(detail, "unknown error", name);
+    check(detail!);
+    assert.ok(!out.includes("LATER-LINE-MARKER"), `${name}: no later line`);
+    assert.doesNotMatch(out, PA_COUNTS_RE, `${name}: no count phrase anywhere`);
+  }
+});
+
+// === cap-0ot: minors parked during the split ===============================
+
+// IDs of the rendered rows, in output order.
+const rowIds = (text: string) => [...text.matchAll(/^ID: (\S+)$/gm)].map(m => m[1]);
+
+test("find_objects: a search hit of another structure is never a candidate — plain search path (cap-0ot a)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({ search: { Retro: [
+    { id: "m1", title: "Retro 1", structureId: "meeting" },
+    { id: "p1", title: "Retro notes", structureId: "page" },   // the server ignored structureIds
+    { id: "m2", title: "Retro 2", structureId: "meeting" }
+  ] } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "the foreign hit is never fetched");
+  assert.ok(!res.content[0].text.includes("p1"), "nor shown");
+  assert.equal(exactnessOf(res).seed_size, 2);
+
+  // Zero-GET path too: the foreign hit is not listed.
+  const h2 = getFind();
+  installFind(findRouter({ search: { Retro: [
+    { id: "m1", title: "Retro 1", structureId: "meeting" },
+    { id: "p1", title: "Retro notes", structureId: "page" }
+  ] } }));
+  const res2 = await h2({ structure: "Meeting", title_hint: "Retro" });
+  assert.deepEqual(rowIds(res2.content[0].text), ["m1"]);
+  assert.equal(exactnessOf(res2).seed_size, 1);
+});
+
+test("find_objects: a search hit of another structure is never a candidate — escalated-union path (cap-0ot a)", async () => {
+  const handler = getFind();
+  // 50 raw hits, so the search escalates; the listing (partial) holds none of them.
+  const search = [
+    ...summaries(1001, 1048, n => `Retro ${n}`),
+    { id: uid(1049), title: "Retro foreign", structureId: "page" },
+    ...summaries(1050, 1050, n => `Retro ${n}`)
+  ];
+  const listing = summaries(1, 200, n => `Other ${n}`);
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 1, limit: 100 });
+  assert.equal(res.isError, undefined);
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration", "fixture: the search escalated");
+  const ids = rowIds(res.content[0].text);
+  assert.ok(ids.includes(uid(1050)), "an in-structure search hit is kept");
+  assert.ok(!ids.includes(uid(1049)), "the foreign search hit is not");
+  assert.equal(exactnessOf(res).seed_size, 49);
+});
+
+test("find_objects: the escalated union lists listing rows first, then search-only hits in search order (cap-0ot b)", async () => {
+  const handler = getFind();
+  // Undated titles, so title-date ordering is a stable no-op and the union order shows.
+  const search = summaries(1001, 1050, n => `Retro ${n}`).reverse();   // rank order != id order
+  const listing = [...summaries(1, 3, n => `Retro ${n}`), ...summaries(4, 150, n => `Other ${n}`)];
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 1, limit: 100 });
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration", "fixture: the search escalated");
+  assert.deepEqual(rowIds(res.content[0].text), [uid(1), uid(2), uid(3), ...search.map(h => h.id)]);
+});
+
+test("find_objects: a direct call with limit NaN behaves like an omitted limit on both paths (cap-0ot c)", async () => {
+  const rows = summaries(1, 40, n => `Sync - ${new Date(Date.UTC(2025, 0, n)).toISOString().slice(0, 10)}`);
+  // Zero-GET path: the default row cap, with its Note.
+  for (const limit of [undefined, NaN]) {
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: pagesOf(rows) } }));
+    const res = await handler({ structure: "Meeting", limit });
+    const text = res.content[0].text;
+    assert.match(text, /^Found 30 Meetings/, `limit ${limit}`);
+    assert.match(text, /^Note: showing the first 30 of 40 matching Meetings \(limit\)/m, `limit ${limit}`);
+    assert.equal(exactnessOf(res).returned, 30, `limit ${limit}`);
+  }
+  // Stage-2 path: no slice at all.
+  for (const limit of [undefined, NaN]) {
+    const handler = getFind(fakeClock());
+    installFind(enumRouter({ structurePages: { meeting: pagesOf(rows.slice(0, 10)) } }));
+    const res = await handler({ structure: "Meeting", sort: SORT_DATE_DESC, limit });
+    assert.match(res.content[0].text, /^Found 10 Meetings/, `limit ${limit}`);
+    assert.equal(exactnessOf(res).returned, 10, `limit ${limit}`);
+    assert.equal(exactnessOf(res).matched, 10, `limit ${limit}`);
+  }
+});
+
+test("find_objects: a direct call with fetch_cap 500 fetches at most FETCH_CAP_MAX (cap-0ot d)", async () => {
+  const clock = fakeClock();
+  const handler = getFind(clock);
+  const calls = installFind(enumRouter({ base: { search: { Retro: summaries(1, 49, n => `Retro ${n}`) } } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", fetch_cap: 500, sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.ok(fetchedIds(calls).length <= FETCH_CAP_MAX, `${fetchedIds(calls).length} GETs`);
+});
+
+test("find_objects: a pretty-printed JSON error body reaches a Note compacted, not as a lone '{' (cap-0ot e)", async () => {
+  const handler = getFind();
+  const body = JSON.stringify({ code: "bad_request", message: "nope", details: [{ path: "id" }] }, null, 2);
+  assert.ok(body.includes("\n"), "fixture is multi-line");
+  const fail = { status: 400, text: body };
+  installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: fail, m2: fail, m3: fail } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 400: \{"code":"bad_request","message":"nope","details":\[\{"path":"id"\}\]\}\); results may be incomplete\.$/m);
+});
+
+// === cap-dnf review I1: a 403 ban page stops stage 2 through the rate path ==
+
+test("find_objects: a 403 Cloudflare ban on the first GET stops stage 2 via the rate Note — exactly 1 GET (I1)", async () => {
+  const handler = getFind();
+  const ban = "<!DOCTYPE html>\n<h1>Error 1015</h1>\n<p>The owner of this website has banned you temporarily.</p>";
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: { status: 403, text: ban } } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: rate budget reached — checked 0 of 5 candidates/m);
+  assert.doesNotMatch(text, /stopped reading candidates/);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+});
+
+// === cap-fvb review M3: only service failures advance the breaker ===========
+// A 404 (deleted candidate) or other 4xx says nothing about the service, so it
+// is counted as errored but neither advances nor resets the run.
+
+test("find_objects: 404, 404, 404 then successes reads every candidate — a not-found never trips the breaker (M3)", async () => {
+  const handler = getFind();
+  const gone = { status: 404, text: "not found" };
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: gone, m2: gone, m3: gone } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3", "m4", "m5"]);
+  const text = res.content[0].text as string;
+  assert.doesNotMatch(text, /stopped reading candidates/);
+  assert.match(text, /^Note: 3 candidate\(s\) could not be read and were skipped\.$/m);
+});
+
+test("find_objects: 500, 404, 500, 500 stops after the 4th GET — a 404 neither advances nor resets the run (M3)", async () => {
+  const handler = getFind();
+  const boom = { status: 500, text: "boom" };
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: boom, m2: { status: 404, text: "not found" }, m3: boom, m4: boom }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3", "m4"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them/m);
+  assert.equal(exactnessOf(res).errored, 4);
+  assert.equal(exactnessOf(res).considered, 4);
+});
+
+test("find_objects: network errors with no HTTP status advance the breaker — exactly 3 GETs (M3)", async () => {
+  const handler = getFind();
+  const route = findRouter({ search: { Note: fiveNotes() } });
+  const calls = installFind(c => {
+    if ((c.opts?.method ?? "GET") === "GET" && c.url.includes("/object?id=")) throw new TypeError("fetch failed");
+    return route(c);
+  });
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
+  assert.match(res.content[0].text, /^Note: stopped reading candidates after 3 read errors .*\(fetch failed\)/m);
+});
+
+// === cap-fvb delta D4: only a 404 is exempt from the breaker run ============
+// A 404 is the per-object case (a deleted candidate). A 400 or 410 on every GET
+// is systemic (e.g. an API sunset), so it advances the run like a 5xx.
+
+test("find_objects: 400, 400, 400 stops after 3 GETs — only a 404 is exempt (D4)", async () => {
+  const handler = getFind();
+  const bad = { status: 400, text: "bad request" };
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: bad, m2: bad, m3: bad } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 400: bad request\); results may be incomplete\.$/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+});
+
+test("find_objects: 410, 410, 410 stops after 3 GETs (D4)", async () => {
+  const handler = getFind();
+  const gone = { status: 410, text: "API version sunset" };
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: gone, m2: gone, m3: gone } }));
+  await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
 });

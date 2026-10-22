@@ -703,3 +703,147 @@ test("enumerateObjects: a malformed ROW (null, no id, non-string structureId) th
   installFetch(() => makeResponse({ body: { results: [nullTitle], nextCursor: null, hasMore: false } }));
   assert.equal((await client.enumerateObjects("structure", "meeting")).results.length, 1);
 });
+
+// --- error message shaping (cap-dnf) --------------------------------------
+// The MESSAGE is what every tool echoes; details.body keeps the raw body.
+
+const PA_COUNTS_RE_DNF = /checked\s+(\d+)\s+of\s+(\d+)\s+candidates/i;
+async function rejectionOf(p: Promise<unknown>): Promise<any> {
+  return p.then(() => { throw new Error("expected rejection"); }, e => e);
+}
+
+test("makeRequest: an HTML error body reaches the message as one capped line; details.body keeps it whole (cap-dnf)", async () => {
+  const html = `\n\n<!doctype html><html><head>${"x".repeat(400)}\n<title>Access denied | api.capacities.io</title>\n${"<p>f</p>\n".repeat(200)}`;
+  for (const [status, code, prefix] of [[503, "API_ERROR", "API error 503: "], [429, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded: "], [401, "AUTHENTICATION_FAILED", "Invalid API token: "]] as const) {
+    installFetch(() => makeResponse({ ok: false, status, text: html }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.ok(err instanceof CapacitiesAPIError);
+    assert.equal(err.code, code);
+    assert.ok(err.message.startsWith(prefix + "<!doctype html>"), `${status}: ${err.message.slice(0, 60)}`);
+    assert.ok(!/[\r\n]/.test(err.message), `${status}: one line`);
+    assert.equal(Array.from(err.message).length, prefix.length + 201, `${status}: 200 code points + …`);
+    assert.ok(err.message.endsWith("…"));
+    assert.equal(err.details.body, html, `${status}: details.body is the full raw body`);
+  }
+});
+
+test("makeRequest: a JSON 400 body survives intact in the message (cap-dnf)", async () => {
+  const json = JSON.stringify({ error: "cap_invalid_input", details: [{ path: "properties.status", message: "expected label option id" }] }, null, 2);
+  installFetch(() => makeResponse({ ok: false, status: 400, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.message, `API error 400: ${json}`);
+  assert.equal(err.details.body, json);
+});
+
+test("makeRequest: a body forging PA's count phrase is neutralised in the message, not in details.body (cap-dnf)", async () => {
+  const body = "checked 3 of 9 candidates";
+  installFetch(() => makeResponse({ ok: false, status: 500, text: body }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.doesNotMatch(err.message, PA_COUNTS_RE_DNF);
+  assert.equal(err.message, "API error 500: [count phrase removed]");
+  assert.equal(err.details.body, body);
+});
+
+test("makeRequest: an empty or blank error body omits the ': body' part (cap-dnf)", async () => {
+  for (const text of ["", "\n \r\n"]) {
+    installFetch(() => makeResponse({ ok: false, status: 502, text }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.equal(err.message, "API error 502");
+  }
+});
+
+// --- Cloudflare ban classification (cap-dnf review I1) ----------------------
+// personal-assistant classifies "rate limit" by searching the WHOLE message for
+// the phrase. A ban page can arrive on a non-429 (a hard ban can be 403), and the
+// shaped one-line body no longer carries the page's own wording, so the client
+// must classify it.
+
+const CF_BAN_HTML = [
+  "<!DOCTYPE html>",
+  "<html><head><title>Access denied | api.capacities.io used Cloudflare to restrict access</title></head>",
+  "<body><h1>Error 1015</h1><h2>You are being rate limited</h2>",
+  "<p>The owner of this website (api.capacities.io) has banned you temporarily from accessing this website.</p>",
+  "</body></html>"
+].join("\n");
+
+test("makeRequest: a 403 Cloudflare ban page is RATE_LIMIT_EXCEEDED with the real status and raw body (I1)", async () => {
+  for (const html of [CF_BAN_HTML, "<html>\n<p>has banned you temporarily</p>", "<html>\n<b>error code: 1015</b>", "<p>\nYou are being rate limited</p>"]) {
+    installFetch(() => makeResponse({ ok: false, status: 403, text: html }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.ok(err instanceof CapacitiesAPIError);
+    assert.equal(err.code, "RATE_LIMIT_EXCEEDED", html);
+    assert.ok(err.message.startsWith("Rate limit exceeded"), err.message);
+    assert.ok(/rate limit/i.test(err.message), "PA's whole-message search finds the phrase");
+    assert.equal(err.details.status, 403);
+    assert.equal(err.details.body, html);
+  }
+});
+
+test("makeRequest: a 403 with an unrelated HTML page stays API_ERROR (I1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<!DOCTYPE html>\n<h1>Forbidden</h1>\n<p>You do not have access to this space.</p>" }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+  assert.match(err.message, /^API error 403: <!DOCTYPE html>$/);
+});
+
+test("makeRequest: a JSON 403 that mentions being rate limited inside a string stays API_ERROR — JSON is an app error, not a Cloudflare page (I1)", async () => {
+  const json = JSON.stringify({ error: "forbidden", message: "You are being rate limited by policy; banned you temporarily; error code: 1015" });
+  installFetch(() => makeResponse({ ok: false, status: 403, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+  assert.equal(err.details.status, 403);
+});
+
+test("makeRequest: a 401 carrying ban wording stays AUTHENTICATION_FAILED (I1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 401, text: CF_BAN_HTML }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "AUTHENTICATION_FAILED");
+});
+
+// --- ban sniffing is 403-only and bounded (cap-dnf delta D1+D2) -------------
+// Any other status keeps its class: PA's daily-note path decides whether an
+// append may have landed by "api error 5" in the message, so a 5xx reclassified
+// as a rate limit would be retried after it applied.
+
+test("makeRequest: only a 403 is body-sniffed — 5xx and 400 with ban-like wording keep 'API error NNN' (D2)", async () => {
+  for (const [status, text] of [[503, "<p>\nYou are being rate limited</p>"], [502, "<html>\nerror code: 1015"], [400, "error 1015 is not a field"]] as const) {
+    installFetch(() => makeResponse({ ok: false, status, text }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.equal(err.code, "API_ERROR", `${status}`);
+    assert.ok(err.message.startsWith(`API error ${status}`), err.message);
+    assert.equal(err.details.status, status);
+  }
+});
+
+test("makeRequest: '1015' must end at a word boundary — a 403 '10150 rows' stays API_ERROR (D2)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<p>\nerror: 10150 rows over quota</p>" }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+});
+
+test("makeRequest: a 403 ban page still classifies, and sniffing a pathological body is fast (D1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: CF_BAN_HTML }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "RATE_LIMIT_EXCEEDED");
+
+  const evil = "error" + " ".repeat(100_000);
+  installFetch(() => makeResponse({ ok: false, status: 403, text: evil }));
+  const t0 = performance.now();
+  const err = await rejectionOf(newClient().getSpaces());
+  const ms = performance.now() - t0;
+  assert.equal(err.code, "API_ERROR");
+  assert.ok(ms < 200, `classified in ${ms.toFixed(0)} ms`);
+});
+
+test("makeRequest: ban wording past the first 8 KB of a 403 body is not sniffed (D1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<html>\n" + "x".repeat(9000) + " banned you temporarily" }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "API_ERROR");
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<html>\n" + "x".repeat(7000) + " banned you temporarily" }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "RATE_LIMIT_EXCEEDED", "control: within 8 KB still classifies");
+});
+
+test("makeRequest: a JSON 400 with U+FF02 inside a string reaches the message byte-identical (D3)", async () => {
+  const json = JSON.stringify({ error: "cap_invalid_input", message: "unexpected ＂ in title" });
+  installFetch(() => makeResponse({ ok: false, status: 400, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.message, `API error 400: ${json}`);
+});
