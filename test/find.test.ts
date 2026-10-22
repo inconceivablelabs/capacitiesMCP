@@ -1648,6 +1648,10 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
   // [expected Note-line prefixes in order, expected count-phrase captures]
   type PRow = Row & { notes: string[]; counts: [string, string] | null };
   const partial: PRow[] = [
+    // cap-fvb: a 403 trips the stage-2 breaker.
+    { name: "stage-2 circuit breaker on a 403", marker: /^Note: stopped reading candidates after a 403/m, counts: null,
+      notes: ["Note: stopped reading candidates after a 403 from the server", "Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five }, getFail: { m1: { status: 403, text: "Access denied" } } } }) },
     { name: "page budget, short-circuit", marker: /^Found 30 Meetings/m, counts: null,
       notes: ["Note: listing stopped at the page budget — read 2 pages (200 summaries)", "Note: showing the first 30 of 200 matching Meetings (limit)"],
       res: await run({ page_budget: 2 }, { structurePages: { meeting: pagesOf(many) } }) },
@@ -1932,4 +1936,70 @@ test("find_objects: a null or empty title renders as (untitled) on both row rend
     for (const id of [uid(1), uid(2)]) assert.equal(entries.find(e => e.id === id)!.title, "(untitled)", `${name}: ${id}`);
     assert.equal(entries.find(e => e.id === uid(3))!.title, "Kickoff", `${name}: a real title is untouched`);
   }
+});
+
+// === cap-fvb: stage-2 circuit breaker =======================================
+// A Cloudflare ban can arrive as a 403; every further GET extends an IP-level ban
+// that also takes other consumers on the same egress down. Assert on the number
+// of GETs actually issued, not only on the output text.
+
+function fiveNotes() {
+  return [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+}
+
+test("find_objects: a 403 on the first stage-2 GET stops the loop at once — exactly 1 GET, a stop Note, candidates incomplete (cap-fvb)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: { status: 403, text: "<!doctype html>\nAccess denied" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1"], "no GET after the 403");
+  const text = res.content[0].text as string;
+  const stop = text.split("\n").find(l => l.startsWith("Note: stopped reading candidates after"));
+  assert.ok(stop, `stop Note present:\n${text}`);
+  assert.match(stop!, /403/);
+  assert.match(stop!, /results may be incomplete\.$/);
+  assert.doesNotMatch(text, PA_COUNTS_RE, "the stop Note never uses the reserved rate-budget phrase");
+  assert.match(text, /^Note: 1 candidate\(s\) could not be read and were skipped\.$/m);
+  const ex = exactnessOf(res);
+  assert.equal(ex.candidates_complete, false);
+  assert.equal(ex.errored, 1);
+  assert.equal(ex.considered, 1, "no request was made after the stop");
+});
+
+test("find_objects: three consecutive non-rate failures stop the loop — exactly 3 GETs (cap-fvb)", async () => {
+  const handler = getFind();
+  const boom = { status: 500, text: "boom" };
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: boom, m2: boom, m3: boom }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 consecutive read errors \(API error 500: boom\); results may be incomplete\.$/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+  assert.doesNotMatch(text, /fetched the first/, "the loop stopped; the fetch_cap Note would misstate what was read");
+  const ex = exactnessOf(res);
+  assert.equal(ex.candidates_complete, false);
+  assert.equal(ex.errored, 3);
+  assert.equal(ex.considered, 3);
+});
+
+test("find_objects: a success resets the failure run — fail, ok, fail, fail, ok reads all five, no stop Note (cap-fvb)", async () => {
+  const handler = getFind();
+  const boom = { status: 500, text: "boom" };
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m1: boom, m3: boom, m4: boom }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3", "m4", "m5"]);
+  const text = res.content[0].text as string;
+  assert.doesNotMatch(text, /stopped reading candidates/);
+  assert.match(text, /^Note: 3 candidate\(s\) could not be read and were skipped\.$/m);
+  assert.equal(exactnessOf(res).considered, 5);
 });

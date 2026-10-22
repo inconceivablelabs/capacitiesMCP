@@ -76,6 +76,9 @@ function exactnessBlock(exactness: FindExactness): { type: "text"; text: string 
 
 const ERROR_DETAIL_MAX = 200;
 
+// Stage 2 stops after this many read errors in a row (cap-fvb).
+const MAX_CONSECUTIVE_READ_ERRORS = 3;
+
 // An API error message carries the whole HTTP body (a Cloudflare page runs to
 // thousands of characters), and that body is server-controlled text landing in
 // tool output. Keep the first line, which holds the status, and cap it.
@@ -769,7 +772,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         // 4. Fetch candidates (object bucket, paced) — one GET /object per
         //    candidate, up to fetch_cap, in the order above. Fail-open: a rate
         //    stop ends the loop with partial results; a non-rate read error skips
-        //    the candidate and continues.
+        //    the candidate and continues, unless the circuit breaker trips.
         //    `cap` defaults above: zod's .default(30) is applied by the MCP SDK's
         //    input parse, NOT on a direct handler call. A listing call gets what is
         //    left of the request budget (requestsIssued counts failed pages too); a
@@ -781,14 +784,30 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
         let rateStopped = false;
         let erroredCount = 0;
+        // Circuit breaker (cap-fvb): a Cloudflare ban can arrive as a 403, and every
+        // further GET extends an IP-level ban shared by every client on our egress.
+        // Stop at once on a 403, or after a run of failures a success would reset.
+        let consecutiveErrors = 0;
+        let breakerStop: string | null = null;
         for (let i = 0; i < planned; i++) {
           const cand = candidates[i];
           try {
             const obj = await client.getObject(cand.id, budget);
             fetched.push({ id: cand.id, title: cand.title, props: (obj.properties ?? {}) as Record<string, any> });
+            consecutiveErrors = 0;
           } catch (e) {
             if (e instanceof CapacitiesAPIError && e.code === "RATE_LIMIT_EXCEEDED") { rateStopped = true; break; }
             erroredCount++;
+            consecutiveErrors++;
+            const detail = briefError(e instanceof Error ? e.message : String(e));
+            if (e instanceof CapacitiesAPIError && e.details?.status === 403) {
+              breakerStop = `a 403 from the server (${detail})`;
+              break;
+            }
+            if (consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS) {
+              breakerStop = `${consecutiveErrors} consecutive read errors (${detail})`;
+              break;
+            }
           }
         }
         const consideredCount = fetched.length + erroredCount;
@@ -832,6 +851,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
 
         const stage2Notes: string[] = [];
         if (rateStopped) stage2Notes.push(`Note: rate budget reached — checked ${consideredCount} of ${seedSize} candidates; results may be incomplete (retry shortly or narrow the query).`);
+        // Never the "checked N of M candidates" phrase: PA's pacer reads it as the rate Note.
+        else if (breakerStop) stage2Notes.push(`Note: stopped reading candidates after ${breakerStop}; results may be incomplete.`);
         else if (planned < seedSize) {
           const order = !enumerated ? "in search-rank order"
             : allUndated ? "in listing order"
