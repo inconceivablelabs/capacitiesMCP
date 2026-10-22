@@ -14,7 +14,11 @@ RUN adduser --disabled-password --gecos "" mcpuser
 WORKDIR /app
 
 COPY server/package.json server/package-lock.json ./
-RUN npm ci --omit=dev
+# The base image's bundled npm CLI is never used at runtime (entrypoint and
+# healthcheck call only node/pgrep) and carries its own vulnerable deps
+# (ip-address 10.1.0), invisible to Dependabot — so remove it after install (cap-8h5).
+RUN npm ci --omit=dev \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 COPY --from=builder /build/server/dist/ dist/
 
