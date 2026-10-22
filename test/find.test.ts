@@ -1014,14 +1014,16 @@ test("find_objects: a tag over 512 characters errors before any call; 512 passes
 
 test("find_objects: a RAW seed of 49 does not escalate; 50 does (>=, judged before title filtering)", async () => {
   const listing = summaries(1, 60, n => `Retro ${n}`);
-  let handler = getFind();
+  // Fake clock: these GETs equal the object window, so a real clock would turn an
+  // over-fetch into a 60s wait instead of a failure.
+  let handler = getFind(fakeClock());
   let calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 49) } }, structurePages: { meeting: pagesOf(listing) } }));
   let res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
   assert.equal(enumCalls(calls).length, 0, "49 is an exact seed");
   assert.equal(res.structuredContent.seed_method, "search");
   assert.equal(res.structuredContent.seed_size, 49);
 
-  handler = getFind();
+  handler = getFind(fakeClock());
   calls = installFind(enumRouter({ base: { search: { Retro: listing.slice(0, 50) } }, structurePages: { meeting: pagesOf(listing) } }));
   res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
   assert.equal(enumCalls(calls).length, 1, "50 escalates");
@@ -1210,10 +1212,14 @@ test("find_objects: no filters and no sort → ZERO GET /object, most recent fir
   assert.equal(res.structuredContent.candidates_complete, true);
 
   // Known-positive: with a sort, stage 2 runs and the GET channel is live.
-  handler = getFind();
+  // Fake clock: 30 GETs equals the object window, so on a real clock an
+  // over-fetch would wait 60s and then rate-stop at exactly 30.
+  const clock = fakeClock();
+  handler = getFind(clock);
   calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(dated) } }));
   await handler({ structure: "Meeting", sort: SORT_DATE_DESC });
   assert.equal(fetchedIds(calls).length, 30);
+  assert.deepEqual(clock.sleeps, [], "30 GETs with no window wait");
 });
 
 test("find_objects: a tag-only listing with no filters is zero-GET (design Example C)", async () => {
@@ -1392,7 +1398,9 @@ test("find_objects: without stage 2 nothing is reserved for fetches, and default
   assert.equal(res.structuredContent.seed_complete, true);
   assert.doesNotMatch(res.content[0].text, /clamped/);
 
-  handler = getFind();
+  // Fake clock: these GETs equal the object window, so a real clock would turn an
+  // over-fetch into a 60s wait instead of a failure.
+  handler = getFind(fakeClock());
   calls = installFind(enumRouter({ base: { search: { Sync: big.slice(0, 50) } }, structurePages: { meeting: pagesOf(big) } }));
   res = await handler({ structure: "Meeting", title_hint: "Sync", sort: SORT_DATE_DESC }); // defaults: 12 pages, fetch_cap 30
   assert.equal(enumCalls(calls).length, 12);
