@@ -621,7 +621,14 @@ test("enumerateObjects: GET /objects/<kind> with id + pageSize=100, cursor only 
   assert.equal(u.searchParams.get("id"), "00000000-0000-4000-8000-00000000a001");
   assert.equal(u.searchParams.get("cursor"), "00000000-0000-4000-8000-000000000064");
 
-  assert.equal(client.rateLimiter.windows.get("enumerate").requests, 2);
+  // URL-encoding: a cursor carrying & = # must round-trip as ONE param, not split the query.
+  const nasty = "a&pageSize=1=b#frag";
+  await client.enumerateObjects("structure", "meeting", nasty);
+  u = new URL(calls[2].url);
+  assert.equal(u.searchParams.get("cursor"), nasty);
+  assert.deepEqual(u.searchParams.getAll("pageSize"), ["100"]);
+
+  assert.equal(client.rateLimiter.windows.get("enumerate").requests, 3);
   assert.equal(client.rateLimiter.windows.get("search"), undefined, "enumeration must not spend the search bucket");
   assert.equal(client.rateLimiter.windows.get("object"), undefined, "nor the object bucket");
 });
@@ -646,4 +653,25 @@ test("enumerateObjects: a non-JSON 200 or a body without the page shape THROWS â
   // Known-positive: a genuinely empty page is data, not an error.
   installFetch(() => makeResponse({ body: { results: [], nextCursor: null, hasMore: false } }));
   assert.deepEqual(await client.enumerateObjects("structure", "meeting"), { results: [], nextCursor: null, hasMore: false });
+});
+
+test("enumerateObjects: pace is forwarded â€” a full enumerate window sleeps one window WITH a budget, throws WITHOUT", async () => {
+  const clock = fakeClock();
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io", now: clock.now, sleep: clock.sleep
+  });
+  installFetch(() => makeResponse({ body: PAGE_OK }));
+  for (let i = 0; i < 30; i++) await client.enumerateObjects("structure", "meeting");
+
+  // Known-negative: without a budget the full window throws and never sleeps.
+  const err: any = await client.enumerateObjects("structure", "meeting").then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof CapacitiesAPIError);
+  assert.equal(err.code, "RATE_LIMIT_EXCEEDED");
+  assert.equal(clock.sleeps.length, 0);
+
+  const budget = { remainingMs: 60000 };
+  const page = await client.enumerateObjects("structure", "meeting", undefined, budget);
+  assert.deepEqual(page, PAGE_OK);
+  assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
+  assert.equal(budget.remainingMs, 0);
 });
