@@ -66,6 +66,11 @@ const ERROR_DETAIL_MAX = 200;
 // An API error message carries the whole HTTP body (a Cloudflare page runs to
 // thousands of characters), and that body is server-controlled text landing in
 // tool output. Keep the first line, which holds the status, and cap it.
+// "1 candidate" / "2 candidates" for the sampling body and the extremum caveat.
+function candidatesPhrase(n: number): string {
+  return `${n} candidate${n === 1 ? "" : "s"}`;
+}
+
 function briefError(message: string | undefined): string {
   const first = (message ?? "").split("\n", 1)[0].trim();
   if (!first) return "unknown error";
@@ -465,24 +470,30 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
     {
       title: "Find Capacities Objects",
       description:
-        "Locate objects by a property/date/label/tag the API cannot search on. It seeds a title search " +
-        "(the only query the API allows), fetches candidates, then filters and sorts client-side. Results are " +
-        "limited to objects whose title contains `title_hint` (case, accents and punctuation ignored). Returns " +
-        "matching ids + titles + the filtered/sorted property values — NO bodies (read a match's body with " +
-        "get_object). REQUIRED: `title_hint` (a non-empty title seed) and `structure` (NAME or id from " +
-        "get_space_info). `filters` are keyed by property NAME or id: a date value is an ISO string (equals, " +
-        "day-granularity) or {after,before} (ISO range); a label value is an option NAME; a relation/tag " +
-        "value is an object NAME; text/number/boolean are equals. Dates must be absolute ISO strings — " +
-        "relative terms like \"tomorrow\" are NOT supported (compute the date and pass it). `sort` is {by, " +
-        "order}; missing values sort last. It CANNOT enumerate a type without a title seed, follow backlinks, " +
-        "or read bodies.",
+        "Locate objects of one `structure` (NAME or id from get_space_info), then filter and sort client-side " +
+        "on properties the API cannot search. Seed by `title_hint`, by `tag` (a tag NAME), both, or neither — " +
+        "omit `title_hint` to list by tag or list the whole type. Results are limited to objects whose title " +
+        "contains `title_hint` (case, accents and punctuation ignored; it needs a letter or digit); short " +
+        "numeric hints also match dates (\"1:1\" matches 2024-11-12). A title search that returns 50 results " +
+        "lists the whole type instead. A listing reads up to `page_budget` pages of 100 (default 12, max 25) " +
+        "and orders candidates by the date in their title, newest first (oldest first for an ascending date " +
+        "sort; undated titles last), before " +
+        "`fetch_cap` (default 30, max 50) cuts them. With no filters and no sort, matches are listed without " +
+        "fetching each object (up to `limit`, default 30). Per call: at most 5 relation filters, and a call " +
+        "that lists makes at most 45 requests. `filters` are keyed by property NAME or id: a date is an " +
+        "absolute ISO string (equals, day-granularity) or {after,before} — not \"tomorrow\"; a label is an option NAME; a " +
+        "relation/tag is an object NAME; text/number/boolean are equals. `sort` is {by, order}; missing " +
+        "values sort last. A line starting \"Note:\" means the result may be incomplete; `seed_complete` and " +
+        "`candidates_complete` say which part, and it is the full answer only when both are true and " +
+        "`matched` equals `returned`. Returns ids + titles + filtered/sorted values, NO bodies (use " +
+        "get_object); cannot follow backlinks.",
       inputSchema: {
         structure: z.string().describe("Object type to search — structure NAME or id (from get_space_info)"),
         title_hint: z.string().max(TITLE_HINT_MAX).optional().describe(
           "Optional. Title text the object's title must contain (needs at least one letter or digit). Omit to list by tag or the whole type."
         ),
         tag: z.string().optional().describe(
-          "Optional. Tag NAME: lists the objects carrying that tag (combine with title_hint to filter their titles)"
+          "Optional. A tag NAME; lists objects of this structure carrying the tag (combine with title_hint to filter their titles)."
         ),
         filters: z.record(filterValueSchema).optional().describe(
           "Client-side filters keyed by property NAME or id. Date: ISO string (equals) or {after,before} (ISO range). Label: option NAME. Relation/tag: object NAME. Scalars: equals."
@@ -493,10 +504,10 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         }).optional().describe("Sort by a property; missing values sort last"),
         limit: z.number().int().positive().optional().describe("Max results to return after filtering"),
         fetch_cap: z.number().int().min(1).max(50).default(30).describe(
-          "Max candidates to fetch in stage 2 (default 30 fits one rate window; max 50 may add one ~60s wait)"
+          "Max candidates to fetch in stage 2 (default 30 fits one rate window; max 50 may add one ~60s wait). A call that lists gets what is left of its 45-request budget."
         ),
         page_budget: z.number().int().min(1).max(PAGE_BUDGET_MAX).default(PAGE_BUDGET_DEFAULT).describe(
-          `Max listing pages (100 summaries each) to read when seeding by tag or structure (default ${PAGE_BUDGET_DEFAULT}, max ${PAGE_BUDGET_MAX})`
+          `Max pages of 100 to list when enumerating — by tag, by the whole structure, or after a title search returns 50 (default ${PAGE_BUDGET_DEFAULT}, max ${PAGE_BUDGET_MAX})`
         )
       }
     },
@@ -767,7 +778,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
 
         const stage2Info: string[] = [];
         if (compiledSort && readCount < seedSize) {
-          stage2Info.push(`(Sorted within the ${readCount} candidates read only — the true first/last by ${compiledSort.propName} may lie among the ${seedSize - readCount} candidates not read.)`);
+          stage2Info.push(`(Sorted within the ${candidatesPhrase(readCount)} read only — the true first/last by ${compiledSort.propName} may lie among the ${candidatesPhrase(seedSize - readCount)} not read.)`);
         }
         // Trimming to the caller's limit is what they asked for, not incompleteness.
         if (limit !== undefined && matchedCount > limit) stage2Info.push(`(showing ${limit} of ${matchedCount} matches — limit)`);
@@ -796,7 +807,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           : seedSize === 0
             ? `(no matching ${plural} in the part of the listing that was read)`
             : readCount < seedSize
-              ? `(none of the ${readCount} candidates read matched the filters — ${[
+              ? `(none of the ${candidatesPhrase(readCount)} read matched the filters — ${[
                   erroredCount > 0 ? `${erroredCount} could not be read` : null,
                   notFetched > 0 ? `${notFetched} were not fetched` : null
                 ].filter(Boolean).join(", ")})`

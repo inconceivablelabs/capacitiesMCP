@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "capacities-mcp-server",
   "display_name": "Capacities MCP Server",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Capacities v2 knowledge management integration: search, object CRUD, weblink capture, and daily notes. Runs on the Capacities v2 REST API.",
   "author": {
     "name": "Tom Booth",
@@ -54,7 +54,7 @@
     },
     {
       "name": "find_objects",
-      "description": "Locate objects by a property/date/label/tag the API cannot search on — title-seed search kept to titles containing title_hint, then client-side filter/sort over typed property values (returns ids+titles+values, no bodies)"
+      "description": "Locate objects of one type by title (title_hint), by tag, both, or neither (lists the whole type, paged), then filter and sort client-side over typed property values the API cannot search (returns ids+titles+values, no bodies)"
     },
     {
       "name": "list_spaces",
