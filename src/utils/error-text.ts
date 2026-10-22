@@ -8,12 +8,28 @@
 const JSON_BODY_MAX = 2000;
 const LINE_BODY_MAX = 200;
 
-// personal-assistant's pacer takes the FIRST match of this phrase in find_objects
-// output as the stage-2 counts, so server text echoed there could forge them.
-const COUNT_PHRASE = /checked\s+(\d+)\s+of\s+(\d+)\s+candidates/gi;
+// personal-assistant's pacer takes the FIRST match of
+// r"checked\s+(\d+)\s+of\s+(\d+)\s+candidates" (Python, re.IGNORECASE) in
+// find_objects output as the stage-2 counts, so server text echoed there could
+// forge them. Python's \d and \s are Unicode-wide and its case folding is wider
+// than JS's, so match what PYTHON matches (cap-dnf review M1):
+//  - \s also covers \x1c-\x1f and \x85; \p{Nd} covers every Unicode digit;
+//  - K (U+212A) and ſ (U+017F) fold under /iu, and NFKC maps them too, but
+//    ı/İ (U+0131/U+0130) match i only in Python, so they are spelled out.
+// Brute-forced over every code point against CPython 2026-10-22; the table and
+// the variant fixtures are in test/error-text.test.ts. The unbounded pass catches
+// arbitrarily long whitespace or digit runs; the bounded span pass then removes
+// any other short "checked … candidates" text outright.
+const PY_WS = "[\\s\\x1c-\\x1f\\x85]";
+const PA_COUNT_PHRASE = new RegExp(
+  `checked${PY_WS}+\\p{Nd}+${PY_WS}+of${PY_WS}+\\p{Nd}+${PY_WS}+cand[i\\u0130\\u0131]dates`, "giu");
+const COUNT_SPAN = /checked[\s\S]{0,40}?cand[i\u0130\u0131]dates/giu;
+const COUNT_PHRASE_REMOVED = "[count phrase removed]";
 
 export function neutraliseCountPhrase(text: string): string {
-  return text.replace(COUNT_PHRASE, "checked $1/$2 candidates");
+  return text.normalize("NFKC")
+    .replace(PA_COUNT_PHRASE, COUNT_PHRASE_REMOVED)
+    .replace(COUNT_SPAN, COUNT_PHRASE_REMOVED);
 }
 
 // Cap by code points, not UTF-16 units, so an emoji at the cut is never split

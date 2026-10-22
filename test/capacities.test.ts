@@ -740,7 +740,7 @@ test("makeRequest: a body forging PA's count phrase is neutralised in the messag
   installFetch(() => makeResponse({ ok: false, status: 500, text: body }));
   const err = await rejectionOf(newClient().getSpaces());
   assert.doesNotMatch(err.message, PA_COUNTS_RE_DNF);
-  assert.match(err.message, /^API error 500: checked 3\/9 candidates$/);
+  assert.equal(err.message, "API error 500: [count phrase removed]");
   assert.equal(err.details.body, body);
 });
 
