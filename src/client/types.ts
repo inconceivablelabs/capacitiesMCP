@@ -82,3 +82,10 @@ export interface CapacitiesObject {
   properties: Record<string, unknown>;
   blocks: Record<string, unknown>;
 }
+
+// One page of GET /objects/structure|tag (cap-i93).
+export interface ObjectPage {
+  results: SearchResult[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}

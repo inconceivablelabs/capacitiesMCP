@@ -1,10 +1,14 @@
 
 // File: src/client/capacities.ts - Using native fetch
-import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject } from "./types.js";
+import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject, ObjectPage } from "./types.js";
 
 // Rate-limit window length (ms). Exported so composite-write callers can seed a
 // bounded-wait budget of one window (cap-6dy.19).
 export const WINDOW_MS = 60000;
+
+// Page size for GET /objects/structure|tag enumeration (the API maximum).
+export const ENUMERATE_PAGE_SIZE = 100;
+export type EnumerationKind = "structure" | "tag";
 
 // A mutable, operation-level bounded-wait budget. A single instance is shared
 // across ALL paced calls in one composite write, so cumulative internal sleep is
@@ -123,7 +127,10 @@ export class CapacitiesClient {
 
   private getEndpointType(endpoint: string): EndpointType {
     // Order matters: /object/url must be classified before the generic /object.
+    // /objects/search must stay FIRST: it contains "/objects/" too, and enumeration
+    // has its own bucket so it cannot spend the search budget (cap-i93).
     if (endpoint.includes("/objects/search")) return "search";
+    if (/\/objects\/(structure|tag|collection)\b/.test(endpoint)) return "enumerate";
     if (endpoint.includes("/object/url")) return "weblink";
     if (endpoint.includes("/blocks")) return "blocks";
     if (endpoint.includes("/object")) return "object";
@@ -165,6 +172,36 @@ export class CapacitiesClient {
     // (cap-6dy.20). Real zero-result search returns `{results:[]}`, so this is
     // defensive — but it makes the return type honest.
     return response.results ?? [];
+  }
+
+  // One page of GET /objects/<kind>. Never returns a page it could not validate:
+  // makeRequest degrades non-JSON / empty / unparseable 200s to {success:true}, and
+  // treating that as an empty page would read as "nothing exists" (cap-i93).
+  async enumerateObjects(
+    kind: EnumerationKind,
+    id: string,
+    cursor?: string,
+    pace?: WaitBudget
+  ): Promise<ObjectPage> {
+    let endpoint = `/objects/${kind}?id=${encodeURIComponent(id)}&pageSize=${ENUMERATE_PAGE_SIZE}`;
+    if (cursor !== undefined) endpoint += `&cursor=${encodeURIComponent(cursor)}`;
+
+    const response = await this.makeRequest<unknown>(endpoint, undefined, pace);
+    const page = response as Partial<ObjectPage> | null;
+    if (
+      page !== null &&
+      typeof page === "object" &&
+      Array.isArray(page.results) &&
+      typeof page.hasMore === "boolean" &&
+      (page.nextCursor === null || typeof page.nextCursor === "string")
+    ) {
+      return { results: page.results, nextCursor: page.nextCursor, hasMore: page.hasMore };
+    }
+    throw new CapacitiesAPIError(
+      "API_ERROR",
+      `GET /objects/${kind} returned something that is not a valid enumeration page (non-JSON or missing results/hasMore/nextCursor)`,
+      { endpoint, body: response }
+    );
   }
 
   // Returns the created CapacitiesObject. Typed as unknown so existing tool
@@ -277,7 +314,7 @@ export class CapacitiesClient {
   }
 }
 
-type EndpointType = "space" | "search" | "weblink" | "object" | "blocks";
+type EndpointType = "space" | "search" | "weblink" | "object" | "blocks" | "enumerate";
 
 // Rate limiter implementation
 class RateLimiter {
@@ -288,7 +325,8 @@ class RateLimiter {
     search: { maxRequests: 30, windowMs: 60000 },  // /objects/search
     weblink: { maxRequests: 10, windowMs: 60000 }, // /object/url
     object: { maxRequests: 30, windowMs: 60000 },  // /object, /object/markdown
-    blocks: { maxRequests: 30, windowMs: 60000 }   // /blocks/*
+    blocks: { maxRequests: 30, windowMs: 60000 },  // /blocks/*
+    enumerate: { maxRequests: 30, windowMs: 60000 } // /objects/structure|tag|collection
   };
 
   // Injectable clock/sleep so bounded-wait pacing is testable without real time.
