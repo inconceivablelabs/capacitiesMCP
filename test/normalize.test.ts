@@ -47,7 +47,7 @@ test("matchesTitle: null, undefined and empty titles never match a real query", 
   assert.equal(matchesTitle("", "alpha"), false);
 });
 
-test("an all-punctuation query normalizes to empty (callers must skip filtering)", () => {
+test("an all-punctuation query normalizes to empty (find_objects rejects it; search_content passes it through)", () => {
   assert.equal(normalizeForTitleMatch("///"), "");
   assert.equal(normalizeForTitleMatch(" -- : "), "");
 });

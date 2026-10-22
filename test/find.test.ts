@@ -189,7 +189,7 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
 
 // === find_objects tool (mocked fetch, node --test) =========================
 
-import { setupFindTools } from "../src/tools/find.js";
+import { setupFindTools, PAGE_BUDGET_MAX } from "../src/tools/find.js";
 
 interface FCall { url: string; opts: any; }
 function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
@@ -282,7 +282,7 @@ test("find_objects: blank title_hint → isError, no network calls", async () =>
   const calls = installFind(findRouter({}));
   const res = await handler({ structure: "Meeting", title_hint: "   " });
   assert.equal(res.isError, true);
-  assert.match(res.content[0].text, /title_hint is required/);
+  assert.match(res.content[0].text, /title_hint must contain at least one letter or digit/);
   assert.equal(calls.length, 0);
 });
 
@@ -559,19 +559,13 @@ test("find_objects: no title matches but the seed WAS truncated → non-confiden
   assert.match(text, /^[ \t]*Note:/im, "a truncated empty result must carry a Note: line");
 });
 
-test("find_objects: an all-punctuation title_hint cannot filter — the raw seed is used and a note says so", async () => {
+test("find_objects: an all-punctuation title_hint is an error before any network call (U5)", async () => {
   const handler = getFind();
-  const calls = installFind(findRouter({
-    search: { "///": [
-      { id: "m1", title: "Alpha", structureId: "meeting" },
-      { id: "m2", title: "Beta", structureId: "meeting" }
-    ] }
-  }));
+  const calls = installFind(findRouter({ search: { "///": [{ id: "m1", title: "Alpha", structureId: "meeting" }] } }));
   const res = await handler({ structure: "Meeting", title_hint: "///" });
-  assert.equal(res.isError, undefined);
-  assert.deepEqual(fetchedIds(calls), ["m1", "m2"]);
-  assert.match(res.content[0].text, /could not be used as a title filter/);
-  assert.doesNotMatch(res.content[0].text, /were ignored/);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /title_hint must contain at least one letter or digit/);
+  assert.equal(calls.length, 0);
 });
 
 test("find_objects: the description says results are limited to titles containing title_hint", () => {
@@ -579,4 +573,355 @@ test("find_objects: the description says results are limited to titles containin
   const server: any = { registerTool(name: string, config: any, handler: any) { tools[name] = { name, config, handler }; } };
   setupFindTools(server, findClient());
   assert.match(tools["find_objects"].config.description, /limited to objects whose title contains `title_hint`/);
+});
+
+// === cap-i93: enumeration seeds ============================================
+// Synthetic, spec-shaped data only — this repo is public.
+
+const SPEC_UUID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+function uid(n: number): string { return `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`; }
+const TAG_PRODUCT = uid(0xa0001);
+const SORT_DATE_DESC = { by: "Date", order: "desc" as const };
+interface Summary { id: string; title: string; structureId: string; }
+function summaries(from: number, to: number, title: (n: number) => string, structureId = "meeting"): Summary[] {
+  const out: Summary[] = [];
+  for (let n = from; n <= to; n++) out.push({ id: uid(n), title: title(n), structureId });
+  return out;
+}
+type PageSpec =
+  | { results: Summary[]; nextCursor: string | null; hasMore: boolean }
+  | { fail: { status: number; text: string } }
+  | { html: string };
+// Keyset pages: nextCursor is the page's last id (design fact 4); the last page has hasMore:false.
+function pagesOf(all: Summary[], size = 100): PageSpec[] {
+  const out: PageSpec[] = [];
+  for (let i = 0; i < all.length; i += size) {
+    const results = all.slice(i, i + size);
+    const hasMore = i + size < all.length;
+    out.push({ results, hasMore, nextCursor: hasMore ? results[results.length - 1].id : null });
+  }
+  return out.length ? out : [{ results: [], hasMore: false, nextCursor: null }];
+}
+// Routes /objects/structure and /objects/tag, delegating everything else to
+// findRouter. STRICT like the real API (global rule 8q): unknown params, a
+// pageSize other than 100, a non-UUID tag id or cursor, and an unknown cursor are
+// 400s. An unregistered id is 200-empty, as the real API answers a bogus id
+// (design fact 3). Structure ids are not UUID-checked: the fixtures use "meeting".
+function enumRouter(opts: {
+  base?: Parameters<typeof findRouter>[0];
+  structurePages?: Record<string, PageSpec[]>;
+  tagPages?: Record<string, PageSpec[]>;
+}) {
+  const fallback = findRouter(opts.base ?? {});
+  return (call: FCall) => {
+    const u = new URL(call.url);
+    const kind = u.pathname === "/objects/structure" ? "structure" : u.pathname === "/objects/tag" ? "tag" : null;
+    if (!kind) return fallback(call);
+    const bad = (why: string) => fRouteResp({ ok: false, status: 400, text: why });
+    if ((call.opts?.method ?? "GET") !== "GET") return bad("method");
+    for (const k of u.searchParams.keys()) if (!["id", "cursor", "pageSize"].includes(k)) return bad(`unknown param ${k}`);
+    if (u.searchParams.get("pageSize") !== "100") return bad("pageSize must be pinned at 100");
+    const id = u.searchParams.get("id") ?? "";
+    if (kind === "tag" && !SPEC_UUID.test(id)) return bad("tag id must be a UUID");
+    const cursor = u.searchParams.get("cursor");
+    if (cursor !== null && !SPEC_UUID.test(cursor)) return bad("cursor must be a UUID");
+    const pages = (kind === "structure" ? opts.structurePages : opts.tagPages)?.[id];
+    if (!pages) return fRouteResp({ body: { results: [], nextCursor: null, hasMore: false } });
+    let idx = 0;
+    if (cursor !== null) {
+      idx = pages.findIndex((_p, i) => i > 0 && (pages[i - 1] as any).nextCursor === cursor);
+      if (idx < 0) return bad(`unknown cursor ${cursor}`);
+    }
+    const page = pages[idx];
+    if ("fail" in page) return fRouteResp({ ok: false, status: page.fail.status, text: page.fail.text });
+    if ("html" in page) return fRouteResp({ contentType: "text/html", text: page.html });
+    return fRouteResp({ body: page });
+  };
+}
+function enumCalls(calls: FCall[]): string[] {
+  return calls.map(c => c.url).filter(u => /\/objects\/(structure|tag)\?/.test(u));
+}
+function searchQueries(calls: FCall[]): string[] {
+  return calls.filter(c => c.url.endsWith("/objects/search")).map(c => JSON.parse(c.opts.body).query);
+}
+function findHarness(clock?: { now: () => number; sleep: (ms: number) => Promise<void> }) {
+  const tools: Record<string, any> = {};
+  const server: any = { registerTool(name: string, config: any, handler: any) { tools[name] = { name, config, handler }; } };
+  const client: any = new CapacitiesClient({
+    apiToken: "t", baseUrl: "https://api.capacities.io",
+    ...(clock ? { now: clock.now, sleep: clock.sleep } : {})
+  });
+  setupFindTools(server, client);
+  return { handler: tools["find_objects"].handler, client, config: tools["find_objects"].config };
+}
+
+test("find_objects: a title_hint with no letters or digits is an error before ANY network call — title and tag+title shapes", async () => {
+  for (const hint of ["///", "()", "—", "", "   ", " -- : "]) {
+    for (const extra of [{}, { tag: "product" }]) {
+      const handler = getFind();
+      const calls = installFind(findRouter({}));
+      const res = await handler({ structure: "Meeting", title_hint: hint, ...extra });
+      const label = `${JSON.stringify(hint)} ${JSON.stringify(extra)}`;
+      assert.equal(res.isError, true, label);
+      assert.match(res.content[0].text, /title_hint must contain at least one letter or digit/, label);
+      assert.equal(calls.length, 0, `${label}: no network call of any kind`);
+    }
+  }
+});
+
+test("find_objects: a non-Latin title_hint is accepted and filters normally (U1 known-positive)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({ search: { "会議": [
+    { id: "m1", title: "週次会議", structureId: "meeting" },
+    { id: "x1", title: "Quarterly Planning", structureId: "meeting" }
+  ] } }));
+  const res = await handler({ structure: "Meeting", title_hint: "会議", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1"]);
+  assert.match(res.content[0].text, /Found 1 Meetings matching "会議"/);
+});
+
+test("find_objects: title_hint over 512 characters errors before any call on BOTH shapes; 512 is accepted", async () => {
+  for (const extra of [{}, { tag: "product" }]) {
+    const handler = getFind();
+    const calls = installFind(findRouter({}));
+    const res = await handler({ structure: "Meeting", title_hint: "a".repeat(513), ...extra });
+    assert.equal(res.isError, true, JSON.stringify(extra));
+    assert.match(res.content[0].text, /title_hint is 513 characters; the maximum is 512/);
+    assert.equal(calls.length, 0);
+  }
+  const handler = getFind();
+  const calls = installFind(findRouter({}));
+  const res = await handler({ structure: "Meeting", title_hint: "a".repeat(512) });
+  assert.equal(res.isError, undefined, "512 is within the spec's maxLength");
+  assert.equal(searchQueries(calls).length, 1, "the 512-character hint reached the seed search");
+});
+
+test("find_objects: a blank tag is an error before any network call", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({}));
+  const res = await handler({ structure: "Meeting", tag: "  " });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /tag must be a non-empty tag name/);
+  assert.equal(calls.length, 0);
+});
+
+test("find_objects schema: page_budget 1..25 default 12; title_hint optional, max 512, needs a letter or digit; tag optional; budget < enumerate bucket", () => {
+  const { config, client } = findHarness();
+  const s = config.inputSchema;
+  assert.equal(s.page_budget.safeParse(26).success, false);
+  assert.equal(s.page_budget.safeParse(0).success, false);
+  assert.equal(s.page_budget.safeParse(25).success, true);
+  assert.equal(s.page_budget.parse(undefined), 12);
+  assert.equal(s.title_hint.safeParse(undefined).success, true);
+  assert.equal(s.title_hint.safeParse("x".repeat(513)).success, false);
+  assert.equal(s.title_hint.safeParse("x".repeat(512)).success, true);
+  assert.equal(s.tag.safeParse(undefined).success, true);
+  assert.equal(s.structure.safeParse(undefined).success, false, "structure stays required (QA A12)");
+  // U5: the LLM reads the rule from the parameter description (S-M2: lands with the guard).
+  assert.match(s.title_hint.description, /letter or digit/);
+  assert.doesNotMatch(s.title_hint.description, /REQUIRED/);
+  // One call can never exhaust its own enumerate bucket — the premise of the
+  // non-waiting enumeration budget (design § Rate limiting; 08-21 QA row E4).
+  assert.ok(PAGE_BUDGET_MAX < client.rateLimiter.limits.enumerate.maxRequests);
+});
+
+test("find_objects: no title_hint and no tag lists the structure — header has no 'undefined', flags complete", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(summaries(1, 3, n => `Kickoff ${n}`)) } }));
+  const res = await handler({ structure: "Meeting", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  const text = res.content[0].text;
+  assert.match(text, /^Found 3 Meetings \(live as of /);
+  assert.doesNotMatch(text, /undefined/);
+  assert.equal(enumCalls(calls).length, 1);
+  const u = new URL(enumCalls(calls)[0]);
+  assert.equal(u.pathname, "/objects/structure");
+  assert.equal(u.searchParams.get("id"), "meeting");
+  assert.deepEqual(searchQueries(calls), [], "no title search on the no-seed shape");
+  assert.equal(res.structuredContent.seed_method, "structure-enumeration");
+  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(res.structuredContent.seed_size, 3);
+});
+
+test("find_objects: page budget exhausted → stage-1 Note without the stage-2 count phrase; seed incomplete", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(summaries(1, 250, n => `Kickoff ${n}`)) } }));
+  const res = await handler({ structure: "Meeting", page_budget: 2 });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 2);
+  const text = res.content[0].text;
+  assert.match(text, /^Note: listing stopped at the page budget — read 2 pages \(200 summaries\) and more remain/m);
+  assert.doesNotMatch(text, /checked\s+\d+\s+of\s+\d+\s+candidates/i, "stage-1 counts never use the stage-2 phrase (U6)");
+  assert.equal(res.structuredContent.seed_complete, false);
+  assert.equal(res.structuredContent.seed_size, 200);
+});
+
+test("find_objects: a resolved structure that enumerates to [] is a genuine none", async () => {
+  const handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: pagesOf([]) } }));
+  const res = await handler({ structure: "Meeting" });
+  assert.equal(res.isError, undefined);
+  assert.match(res.content[0].text, /^No Meetings found \(live as of /);
+  assert.equal(res.structuredContent.seed_complete, true);
+  assert.equal(res.structuredContent.returned, 0);
+});
+
+test("find_objects: a 429 on page 1 is PARTIAL, never 'No … found' (rate-stop poisons exactness)", async () => {
+  const handler = getFind();
+  installFind(enumRouter({ structurePages: { meeting: [{ fail: { status: 429, text: "<!doctype html>banned" } }] } }));
+  const res = await handler({ structure: "Meeting" });
+  assert.equal(res.isError, undefined, "fail-open: partial, not an error");
+  const text = res.content[0].text;
+  assert.doesNotMatch(text, /No Meetings found/);
+  assert.match(text, /^Note: rate limit reached while listing — read 0 page\(s\) before stopping/m);
+  assert.equal(res.structuredContent.seed_complete, false);
+});
+
+test("find_objects: a non-JSON page (HTML 200) is PARTIAL, never 'No … found'", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({ structurePages: { meeting: [{ html: "<!doctype html><title>Just a moment</title>" }] } }));
+  const res = await handler({ structure: "Meeting" });
+  assert.equal(res.isError, undefined);
+  const text = res.content[0].text;
+  assert.doesNotMatch(text, /No Meetings found/);
+  assert.match(text, /^Note: listing stopped after 0 page\(s\) because a page could not be read/m);
+  assert.equal(enumCalls(calls).length, 1);
+  assert.equal(res.structuredContent.seed_complete, false);
+});
+
+test("find_objects: tag only — resolves the NAME by a RootTag-scoped search, enumerates the tag, keeps only this structure", async () => {
+  const handler = getFind();
+  const tagged: Summary[] = [
+    { id: uid(1), title: "Roadmap Sync", structureId: "meeting" },
+    { id: uid(2), title: "Product brief", structureId: "RootPage" },
+    { id: uid(3), title: "Pricing Review", structureId: "meeting" }
+  ];
+  const calls = installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf(tagged) }
+  }));
+  const res = await handler({ structure: "Meeting", tag: "product", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  const tagSearch = calls.find(c => c.url.endsWith("/objects/search"))!;
+  assert.deepEqual(JSON.parse(tagSearch.opts.body).structureIds, ["RootTag"], "tag names resolve against tags only (08-21 QA F3)");
+  const u = new URL(enumCalls(calls)[0]);
+  assert.equal(u.pathname, "/objects/tag");
+  assert.equal(u.searchParams.get("id"), TAG_PRODUCT);
+  const text = res.content[0].text;
+  assert.match(text, /^Found 2 Meetings tagged "product" \(live as of /);
+  assert.ok(text.includes(`ID: ${uid(1)}`) && text.includes(`ID: ${uid(3)}`));
+  assert.ok(!text.includes(`ID: ${uid(2)}`), "a tagged Page is not a Meeting");
+  assert.equal(res.structuredContent.seed_method, "tag-enumeration");
+});
+
+test("find_objects: tag + title filters the tag listing client-side and issues NO title search", async () => {
+  const handler = getFind();
+  const tagged: Summary[] = [
+    { id: uid(1), title: "Roadmap Sync", structureId: "meeting" },
+    { id: uid(3), title: "Pricing Review", structureId: "meeting" },
+    { id: uid(4), title: "roadmap/planning", structureId: "meeting" }
+  ];
+  const calls = installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf(tagged) }
+  }));
+  const res = await handler({ structure: "Meeting", tag: "product", title_hint: "roadmap", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(searchQueries(calls), ["product"], "only the tag-name resolution searches");
+  const text = res.content[0].text;
+  assert.match(text, /^Found 2 Meetings tagged "product" with a title matching "roadmap" \(live as of /);
+  assert.ok(text.includes(`ID: ${uid(1)}`) && text.includes(`ID: ${uid(4)}`));
+  assert.ok(!text.includes(`ID: ${uid(3)}`));
+  assert.equal(res.structuredContent.seed_method, "tag-enumeration");
+});
+
+test("find_objects: unknown / ambiguous / truncated tag each error distinctly and issue NO enumeration call", async () => {
+  const cases: [string, any[], RegExp][] = [
+    ["unknown", [], /no tag named "product"/],
+    ["ambiguous", [
+      { id: TAG_PRODUCT, title: "product", structureId: "RootTag" },
+      { id: uid(0xa0002), title: "Product", structureId: "RootTag" }
+    ], /tag "product" is ambiguous/],
+    ["truncated", Array.from({ length: 50 }, (_, i) => ({ id: uid(0xb000 + i), title: `product launch ${i}`, structureId: "RootTag" })),
+      /could not confirm the tag "product"/]
+  ];
+  for (const [name, results, re] of cases) {
+    const handler = getFind();
+    const calls = installFind(enumRouter({ base: { search: { product: results } } }));
+    const res = await handler({ structure: "Meeting", tag: "product" });
+    assert.equal(res.isError, true, name);
+    assert.match(res.content[0].text, re, name);
+    assert.equal(enumCalls(calls).length, 0, `${name}: no enumeration call`);
+    if (name === "truncated") assert.doesNotMatch(res.content[0].text, /no tag named/, "truncated is not 'not found'");
+    if (name === "ambiguous") assert.ok(res.content[0].text.includes(TAG_PRODUCT) && res.content[0].text.includes(uid(0xa0002)));
+  }
+});
+
+test("find_objects: a tag search of 50 results that DOES contain the exact name resolves (truncated near-miss control)", async () => {
+  const handler = getFind();
+  const fifty = Array.from({ length: 49 }, (_, i) => ({ id: uid(0xb000 + i), title: `product launch ${i}`, structureId: "RootTag" }));
+  fifty.push({ id: TAG_PRODUCT, title: "product", structureId: "RootTag" });
+  const calls = installFind(enumRouter({ base: { search: { product: fifty } }, tagPages: { [TAG_PRODUCT]: pagesOf([]) } }));
+  const res = await handler({ structure: "Meeting", tag: "product" });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 1);
+});
+
+test("find_objects: a tag that resolves to a non-UUID id is an error and is never sent to /objects/tag", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({ base: { search: { product: [{ id: "tag-product", title: "product", structureId: "RootTag" }] } } }));
+  const res = await handler({ structure: "Meeting", tag: "product" });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /resolved to "tag-product", which is not a valid tag id/);
+  assert.equal(enumCalls(calls).length, 0);
+});
+
+test("find_objects: a resolved tag with no objects is a genuine none; the tag path is page-budgeted too", async () => {
+  let handler = getFind();
+  installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf([]) }
+  }));
+  let res = await handler({ structure: "Meeting", tag: "product" });
+  assert.match(res.content[0].text, /^No Meetings found tagged "product" \(live as of /);
+  assert.equal(res.structuredContent.seed_complete, true);
+
+  handler = getFind();
+  const calls = installFind(enumRouter({
+    base: { search: { product: [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }] } },
+    tagPages: { [TAG_PRODUCT]: pagesOf(summaries(1, 250, n => `Tagged ${n}`)) }
+  }));
+  res = await handler({ structure: "Meeting", tag: "product", page_budget: 2 });
+  assert.equal(enumCalls(calls).length, 2);
+  assert.match(res.content[0].text, /^Note: listing stopped at the page budget/m);
+  assert.equal(res.structuredContent.seed_complete, false);
+});
+
+test("find_objects: seed_complete and candidates_complete are independent — a complete seed over a truncated fetch", async () => {
+  const handler = getFind();
+  const three = [1, 2, 3].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  installFind(findRouter({ search: { Note: three } }));
+  let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: SORT_DATE_DESC });
+  assert.deepEqual(
+    { ...res.structuredContent },
+    { seed_method: "search", seed_complete: true, candidates_complete: false, seed_size: 3, considered: 2, errored: 0, matched: 2, returned: 2 }
+  );
+  // Known-positive: the same call with room to fetch everything is complete on both axes.
+  installFind(findRouter({ search: { Note: three } }));
+  res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 30, sort: SORT_DATE_DESC });
+  assert.equal(res.structuredContent.candidates_complete, true);
+  assert.equal(res.structuredContent.considered, 3);
+});
+
+test("find_objects: a candidate that errors in stage 2 makes candidates_complete false", async () => {
+  const handler = getFind();
+  installFind(findRouter({
+    search: { Note: [{ id: "m1", title: "Note", structureId: "meeting" }, { id: "m2", title: "Note", structureId: "meeting" }] },
+    getFail: { m2: { status: 404, text: "gone" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.equal(res.structuredContent.candidates_complete, false);
+  assert.equal(res.structuredContent.errored, 1);
+  assert.equal(res.structuredContent.considered, 2, "considered counts the errored one");
 });

@@ -24,7 +24,72 @@ import {
 import { CapacitiesStructure } from "../client/types.js";
 import { PropertyIndex, buildPropertyIndex, resolvePropertyKey } from "./object.js";
 import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
+import { enumerateAll, EnumerationResult } from "./enumerate.js";
 import { normalizeName as normalize, normalizeForTitleMatch, matchesTitle } from "../utils/normalize.js";
+import { isSpecUuid } from "../utils/validation.js";
+
+// --- Seed shapes + exactness (cap-i93) --------------------------------------
+
+export const PAGE_BUDGET_DEFAULT = 12;
+export const PAGE_BUDGET_MAX = 25;
+export const TITLE_HINT_MAX = 512;           // spec: /objects/search query maxLength
+export const MAX_REQUESTS_PER_CALL = 45;    // used from Task 8
+
+export type SeedMethod = "search" | "search+enumeration" | "tag-enumeration" | "structure-enumeration";
+// Returned as structuredContent on every non-error result, so a caller can tell a
+// genuine none from a partial one without parsing Note: lines. A type alias, not
+// an interface: the SDK's structuredContent needs an implicit index signature.
+export type FindExactness = {
+  seed_method: SeedMethod;
+  seed_complete: boolean;
+  candidates_complete: boolean;
+  seed_size: number;    // candidates after structure/title filtering
+  considered: number;   // stage 2: fetched + errored
+  errored: number;
+  matched: number;      // matches after filtering, BEFORE the limit slice (D3)
+  returned: number;     // rows in the response
+};
+
+// Stage-1 Note for an incomplete listing. Never uses stage 2's "checked N of M
+// candidates" phrase: personal-assistant's backfill keys on it (U6).
+function enumerationNote(e: EnumerationResult): string | null {
+  if (e.complete) return null;
+  switch (e.stopReason) {
+    case "page-budget":
+      return `Note: listing stopped at the page budget — read ${e.pagesRead} pages (${e.results.length} summaries) and more remain; ` +
+        `results may be incomplete. Narrow the seed (title_hint or tag) or raise page_budget (max ${PAGE_BUDGET_MAX}).`;
+    case "rate-limit":
+      return `Note: rate limit reached while listing — read ${e.pagesRead} page(s) before stopping; results may be incomplete (retry shortly).`;
+    case "no-cursor":
+      return `Note: the listing reported more pages but returned no usable cursor — read ${e.pagesRead} page(s); results may be incomplete.`;
+    default:
+      return `Note: listing stopped after ${e.pagesRead} page(s) because a page could not be read (${e.errorMessage ?? "unknown error"}); results may be incomplete.`;
+  }
+}
+
+/** Tag NAME → tag id, strictly: anything but one exact, spec-valid match is a problem. */
+async function resolveTag(
+  client: CapacitiesClient,
+  tag: string,
+  pace: WaitBudget
+): Promise<{ id: string } | { problem: string }> {
+  // Scoped to RootTag so a same-named Page or Meeting can never resolve as the tag.
+  const r = await resolveEntities(client, [tag], ["RootTag"], { pace });
+  if (r.linked.length === 1) {
+    const id = r.linked[0].id;
+    if (!isSpecUuid(id)) return { problem: `tag "${tag}" resolved to "${id}", which is not a valid tag id; nothing was listed.` };
+    return { id };
+  }
+  if (r.ambiguous.length > 0) {
+    const cands = r.ambiguous[0].candidates;
+    const list = cands.map(c => `${c.title} (${c.id})`).join(", ");
+    return { problem: `tag "${tag}" is ambiguous — ${cands.length} tags have that name: ${list}; rename one or use a more specific name.` };
+  }
+  if (r.truncated.length > 0) {
+    return { problem: `could not confirm the tag "${tag}" — the tag search returned the maximum ${SEARCH_LIMIT} results with no exact name match; use a more specific name.` };
+  }
+  return { problem: `no tag named "${tag}" — check the name with search_content (tags are objects of type Tag).` };
+}
 
 // --- Read-shape value extractors -------------------------------------------
 // GET /object (JSON) returns `properties` as a map of property-definition-id →
@@ -365,7 +430,12 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         "or read bodies.",
       inputSchema: {
         structure: z.string().describe("Object type to search — structure NAME or id (from get_space_info)"),
-        title_hint: z.string().describe("Title text to seed the search (REQUIRED, non-empty — the only seed the API allows)"),
+        title_hint: z.string().max(TITLE_HINT_MAX).optional().describe(
+          "Optional. Title text the object's title must contain (needs at least one letter or digit). Omit to list by tag or the whole type."
+        ),
+        tag: z.string().optional().describe(
+          "Optional. Tag NAME: lists the objects carrying that tag (combine with title_hint to filter their titles)"
+        ),
         filters: z.record(filterValueSchema).optional().describe(
           "Client-side filters keyed by property NAME or id. Date: ISO string (equals) or {after,before} (ISO range). Label: option NAME. Relation/tag: object NAME. Scalars: equals."
         ),
@@ -376,16 +446,29 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         limit: z.number().int().positive().optional().describe("Max results to return after filtering"),
         fetch_cap: z.number().int().min(1).max(50).default(30).describe(
           "Max candidates to fetch in stage 2 (default 30 fits one rate window; max 50 may add one ~60s wait)"
+        ),
+        page_budget: z.number().int().min(1).max(PAGE_BUDGET_MAX).default(PAGE_BUDGET_DEFAULT).describe(
+          `Max listing pages (100 summaries each) to read when seeding by tag or structure (default ${PAGE_BUDGET_DEFAULT}, max ${PAGE_BUDGET_MAX})`
         )
       }
     },
-    async ({ structure, title_hint, filters, sort, limit, fetch_cap }) => {
+    async ({ structure, title_hint, tag, filters, sort, limit, fetch_cap, page_budget }) => {
       try {
-        // 0. Validate the seed BEFORE any call — a blank title_hint is never fired
-        //    as an empty search (the API's only seed lever must be meaningful).
-        if (!title_hint || !title_hint.trim()) {
-          return { content: [{ type: "text", text: "title_hint is required and must be non-empty — it is the title seed for stage 1." }], isError: true };
+        // 0. Validate the seed BEFORE any call. A hint that normalizes to "" (blank
+        //    or all punctuation) would match every title, so it is refused rather
+        //    than fired as a search that cannot be filtered (cap-i93 U5).
+        if (title_hint !== undefined && normalizeForTitleMatch(title_hint) === "") {
+          return { content: [{ type: "text", text: "title_hint must contain at least one letter or digit — omit it to list by tag or by the whole structure." }], isError: true };
         }
+        if (title_hint !== undefined && title_hint.length > TITLE_HINT_MAX) {
+          return { content: [{ type: "text", text: `title_hint is ${title_hint.length} characters; the maximum is ${TITLE_HINT_MAX}.` }], isError: true };
+        }
+        if (tag !== undefined && tag.trim() === "") {
+          return { content: [{ type: "text", text: "tag must be a non-empty tag name." }], isError: true };
+        }
+        // zod's bounds and default are applied by the MCP SDK's input parse, NOT on a
+        // direct handler call, so clamp here too (A11).
+        const pageBudget = Math.min(Math.max(page_budget ?? PAGE_BUDGET_DEFAULT, 1), PAGE_BUDGET_MAX);
 
         // 1. Resolve the structure (space bucket — one call, reused).
         const { structures } = await client.getSpaceInfo();
@@ -411,48 +494,104 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           return { content: [{ type: "text", text: "Cannot run find_objects:\n- " + allProblems.join("\n- ") }], isError: true };
         }
 
-        // 3. Seed: title search scoped to the one structure (search bucket).
-        const seed = await client.searchContent(
-          { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
-          budget
-        );
-        // Truncation is a property of the RAW search: at the cap, a title match
-        // may sit beyond it whatever the filter below keeps.
-        const seedTruncated = seed.length >= SEARCH_LIMIT;
-        const stamp = new Date().toISOString();
+        // 3. Seed. A title search when only a hint is given; otherwise a listing of
+        //    the tag (or the whole structure), filtered client-side.
+        const plural = struct.pluralName;
+        let seedMethod: SeedMethod;
+        let seedComplete: boolean;
+        let candidates: { id: string; title: string }[];
+        let header: (n: number, stamp: string) => string;
+        let noneText: (stamp: string) => string;
+        const infoLines: string[] = [];
+        const stage1Notes: string[] = [];
 
-        // cap-1kc: the search also returns objects related BY MEANING, interleaved
-        // by relevance — a semantic extra can be a newer dated object and win a
-        // sort-desc + limit-1. Keep only title matches. A hint that normalizes to
-        // "" (all punctuation) cannot filter, so the raw seed is used as before.
-        const filterable = normalizeForTitleMatch(title_hint) !== "";
-        const titleSeed = filterable ? seed.filter(r => matchesTitle(r.title, title_hint)) : seed;
-        const droppedCount = seed.length - titleSeed.length;
+        if (tag === undefined && title_hint !== undefined) {
+          const seed = await client.searchContent(
+            { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
+            budget
+          );
+          // Truncation is a property of the RAW search: at the cap, a title match
+          // may sit beyond it whatever the filter below keeps.
+          const seedTruncated = seed.length >= SEARCH_LIMIT;
+          // cap-1kc: the search also returns objects related BY MEANING, interleaved
+          // by relevance — a semantic extra can be a newer dated object and win a
+          // sort-desc + limit-1. Keep only title matches.
+          candidates = seed.filter(r => matchesTitle(r.title, title_hint));
+          const droppedCount = seed.length - candidates.length;
 
-        if (titleSeed.length === 0) {
-          if (seedTruncated) {
+          if (candidates.length === 0 && seedTruncated) {
+            const stamp = new Date().toISOString();
+            const exactness: FindExactness = {
+              seed_method: "search", seed_complete: false, candidates_complete: true,
+              seed_size: 0, considered: 0, errored: 0, matched: 0, returned: 0
+            };
             return { content: [{ type: "text", text:
               `None of the ${SEARCH_LIMIT} search results has a title containing "${title_hint}" (Capacities search ` +
               `also returns matches by meaning) — a ${struct.title} with a matching title may exist beyond them; ` +
               `narrow title_hint (live as of ${stamp}).\n\n` +
-              `Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.` }] };
+              `Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.` }],
+              structuredContent: exactness };
           }
-          return { content: [{ type: "text", text: `No ${struct.pluralName} found with a title matching "${title_hint}" (live as of ${stamp}).` }] };
+          seedMethod = "search";
+          seedComplete = !seedTruncated;
+          header = (n, stamp) => `Found ${n} ${plural} matching "${title_hint}" (live as of ${stamp}):`;
+          noneText = stamp => `No ${plural} found with a title matching "${title_hint}" (live as of ${stamp}).`;
+          if (droppedCount > 0) infoLines.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
+          if (seedTruncated) stage1Notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
+        } else {
+          let listing: EnumerationResult;
+          if (tag !== undefined) {
+            // Every tag problem fails before any enumeration call.
+            const tres = await resolveTag(client, tag, budget);
+            if ("problem" in tres) {
+              return { content: [{ type: "text", text: tres.problem }], isError: true };
+            }
+            listing = await enumerateAll(client, "tag", tres.id, pageBudget);
+            seedMethod = "tag-enumeration";
+            const scope = title_hint !== undefined
+              ? `tagged "${tag}" with a title matching "${title_hint}"`
+              : `tagged "${tag}"`;
+            header = (n, stamp) => `Found ${n} ${plural} ${scope} (live as of ${stamp}):`;
+            noneText = stamp => `No ${plural} found ${scope} (live as of ${stamp}).`;
+          } else {
+            listing = await enumerateAll(client, "structure", struct.id, pageBudget);
+            seedMethod = "structure-enumeration";
+            header = (n, stamp) => `Found ${n} ${plural} (live as of ${stamp}):`;
+            noneText = stamp => `No ${plural} found (live as of ${stamp}).`;
+          }
+          // A tag spans every type, so keep only this structure. The structure
+          // listing gets the same filter: harmless when the API honours the id,
+          // and it keeps seed_size meaning "candidates of this type".
+          candidates = listing.results.filter(r =>
+            r.structureId === struct.id && (title_hint === undefined || matchesTitle(r.title, title_hint))
+          );
+          seedComplete = listing.complete;
+          const note = enumerationNote(listing);
+          if (note) stage1Notes.push(note);
+        }
+        const stamp = new Date().toISOString();
+
+        if (seedComplete && candidates.length === 0) {
+          const exactness: FindExactness = {
+            seed_method: seedMethod, seed_complete: true, candidates_complete: true,
+            seed_size: 0, considered: 0, errored: 0, matched: 0, returned: 0
+          };
+          return { content: [{ type: "text", text: noneText(stamp) }], structuredContent: exactness };
         }
 
         // 4. Fetch candidates (object bucket, paced) — one GET /object per
-        //    candidate, up to fetch_cap, in search-rank order. Fail-open: a rate
+        //    candidate, up to fetch_cap, in seed order. Fail-open: a rate
         //    stop ends the loop with partial results; a non-rate read error skips
         //    the candidate and continues.
         // NOTE: zod's .default(30) is applied by the MCP SDK's input parse, NOT on a
         // direct handler call (tests invoke the handler directly), so default here too.
         const cap = fetch_cap ?? 30;
-        const planned = Math.min(titleSeed.length, cap);
+        const planned = Math.min(candidates.length, cap);
         const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
         let rateStopped = false;
         let erroredCount = 0;
         for (let i = 0; i < planned; i++) {
-          const cand = titleSeed[i];
+          const cand = candidates[i];
           try {
             const obj = await client.getObject(cand.id, budget);
             fetched.push({ id: cand.id, title: cand.title, props: (obj.properties ?? {}) as Record<string, any> });
@@ -473,6 +612,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             compareForSort(sortKey(a.props[cs.propId]), sortKey(b.props[cs.propId]), cs.order)
           );
         }
+        const matchedCount = matches.length;
         if (limit !== undefined) matches = matches.slice(0, limit);
 
         // 7. Surface only the filtered + sorted property values (P9 — not a full dump).
@@ -486,21 +626,34 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           return lines.join("\n");
         });
 
-        const header = `Found ${matches.length} ${struct.pluralName} matching "${title_hint}" (live as of ${stamp}):`;
         // Contract: every "Note:" line means the result may be INCOMPLETE —
         // personal-assistant's backfill_meeting_titles.py fails a run on any
         // Note: line. Informational lines must not start with "Note:".
-        const notes: string[] = [];
-        if (seedTruncated) notes.push(`Note: the title search returned the maximum ${SEARCH_LIMIT} candidates — a match may exist beyond it; narrow title_hint.`);
-        if (droppedCount > 0) notes.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
-        if (!filterable) notes.push(`Note: title_hint "${title_hint}" has no letters or digits, so it could not be used as a title filter — results may include objects whose titles do not contain it.`);
-        if (rateStopped) notes.push(`Note: rate budget reached — checked ${consideredCount} of ${titleSeed.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
-        else if (planned < titleSeed.length) notes.push(`Note: fetched the first ${planned} of ${titleSeed.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
-        else if (erroredCount > 0) notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
+        const stage2Notes: string[] = [];
+        if (rateStopped) stage2Notes.push(`Note: rate budget reached — checked ${consideredCount} of ${candidates.length} candidates; results may be incomplete (retry shortly or narrow the query).`);
+        else if (planned < candidates.length) stage2Notes.push(`Note: fetched the first ${planned} of ${candidates.length} candidates (fetch_cap) in search-rank order; raise fetch_cap or narrow title_hint.`);
+        else if (erroredCount > 0) stage2Notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
+        const trailer = [...infoLines, ...stage1Notes, ...stage2Notes];
 
-        const body = blocks.length ? blocks.join("\n---\n") : "(no candidates matched the filters)";
-        const noteLine = notes.length ? "\n\n" + notes.join("\n") : "";
-        return { content: [{ type: "text", text: `${header}\n\n${body}${noteLine}` }] };
+        // An empty candidate list here is a PARTIAL none (the listing stopped
+        // early): never rendered as "No … found".
+        const body = blocks.length
+          ? blocks.join("\n---\n")
+          : candidates.length === 0
+            ? `(no matching ${plural} in the part of the listing that was read)`
+            : "(no candidates matched the filters)";
+        const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
+        const exactness: FindExactness = {
+          seed_method: seedMethod,
+          seed_complete: seedComplete,
+          candidates_complete: !rateStopped && planned === candidates.length && erroredCount === 0,
+          seed_size: candidates.length,
+          considered: consideredCount,
+          errored: erroredCount,
+          matched: matchedCount,
+          returned: matches.length
+        };
+        return { content: [{ type: "text", text: `${header(matches.length, stamp)}\n\n${body}${noteLine}` }], structuredContent: exactness };
       } catch (error) {
         const message = error instanceof CapacitiesAPIError ? error.message : error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: `Failed to find objects: ${message}` }], isError: true };
