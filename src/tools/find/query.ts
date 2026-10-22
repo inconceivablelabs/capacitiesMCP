@@ -1,0 +1,327 @@
+// File: src/tools/find/query.ts
+//
+// find_objects' query layer (split out of find.ts, cap-0ot): read-shape value
+// extractors, compiled filters and sort, and structure resolution. Pure data in,
+// data out, except compileFilters, which resolves relation names by search.
+import { z } from "zod";
+import { CapacitiesClient, WaitBudget } from "../../client/capacities.js";
+import { CapacitiesStructure } from "../../client/types.js";
+import { PropertyIndex, resolvePropertyKey } from "../object.js";
+import { resolveEntities, SEARCH_LIMIT } from "../resolution.js";
+import { normalizeName as normalize } from "../../utils/normalize.js";
+
+// Date.parse alone accepts "2026", "2026-07" and "July 4 2026"; a date-equals
+// filter compiled from one has no YYYY-MM-DD day and silently matches nothing
+// (cap-9ti). Require the ISO day prefix, then let Date.parse reject the rest.
+const ISO_DAY_PREFIX = /^\d{4}-\d{2}-\d{2}/;
+const INVALID_DATE = "is not a valid ISO date (YYYY-MM-DD or full timestamp)";
+function parseFilterDate(s: string): number {
+  return ISO_DAY_PREFIX.test(s) ? Date.parse(s) : NaN;
+}
+
+// --- Read-shape value extractors -------------------------------------------
+// GET /object (JSON) returns `properties` as a map of property-definition-id →
+// typed value, discriminated on `type`. Shapes are spec-verified against
+// components.schemas.ApiObjectPropertyValue in the live OpenAPI (2026-07-13):
+//   date    {type:"date",  date:{start:string|null, end:string|null, dateResolution:"time"|"day"}}
+//   label   {type:"label", label:[{id,name,color?}]}
+//   entity  {type:"entity",entity:[{id}]}                 (id-ONLY — no name)
+//   scalar  {type:"text|number|boolean|url|title", <type>:{value:<v>|null}}
+
+/** "YYYY-MM-DD" day slice of an ISO date string. */
+export function dayOf(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+export function readDate(v: any): { start: string | null; resolution: "day" | "time" } | null {
+  if (!v || v.type !== "date" || !v.date) return null;
+  return {
+    start: typeof v.date.start === "string" ? v.date.start : null,
+    resolution: v.date.dateResolution === "day" ? "day" : "time"
+  };
+}
+
+export function readLabels(v: any): { id: string; name: string }[] {
+  if (!v || v.type !== "label" || !Array.isArray(v.label)) return [];
+  return v.label
+    .filter((o: any) => o && typeof o.id === "string")
+    .map((o: any) => ({ id: o.id, name: typeof o.name === "string" ? o.name : o.id }));
+}
+
+export function readEntityIds(v: any): string[] {
+  if (!v || v.type !== "entity" || !Array.isArray(v.entity)) return [];
+  return v.entity.map((e: any) => e?.id).filter((x: any) => typeof x === "string");
+}
+
+export function readScalar(v: any): string | number | boolean | null {
+  if (!v || typeof v.type !== "string") return null;
+  const inner = (v as any)[v.type]; // title/text/number/boolean/url → {value}
+  if (inner && typeof inner === "object" && "value" in inner) {
+    const val = inner.value;
+    return val === undefined ? null : val;
+  }
+  return null;
+}
+
+// --- Compiled filters (data, not closures — so matching is unit-testable) ---
+
+export type CompiledFilter =
+  | { propId: string; propName: string; kind: "date-equals"; day: string; hasTime: boolean; instant: number }
+  | { propId: string; propName: string; kind: "date-range"; afterMs: number | null; beforeMs: number | null }
+  | { propId: string; propName: string; kind: "label-equals"; optionId: string; optionName: string }
+  | { propId: string; propName: string; kind: "entity-equals"; targetId: string; targetName: string }
+  | { propId: string; propName: string; kind: "scalar-equals"; value: string | number | boolean };
+
+// A missing property (not in the object's map) never matches an equals/range.
+export function matchesFilter(props: Record<string, any> | undefined, f: CompiledFilter): boolean {
+  const v = props?.[f.propId];
+  switch (f.kind) {
+    case "date-equals": {
+      const d = readDate(v);
+      if (!d || !d.start) return false;
+      // Day-granularity match when the filter is a date-only string OR the stored
+      // value is day-resolution — matches any time within that calendar day.
+      if (!f.hasTime || d.resolution === "day") return dayOf(d.start) === f.day;
+      const ms = Date.parse(d.start);
+      return !Number.isNaN(ms) && ms === f.instant;
+    }
+    case "date-range": {
+      const d = readDate(v);
+      if (!d || !d.start) return false;
+      const ms = Date.parse(d.start);
+      if (Number.isNaN(ms)) return false;
+      if (f.afterMs !== null && ms < f.afterMs) return false;   // after = inclusive lower
+      if (f.beforeMs !== null && ms >= f.beforeMs) return false; // before = exclusive upper
+      return true;
+    }
+    case "label-equals":
+      return readLabels(v).some(o => o.id === f.optionId);
+    case "entity-equals":
+      return readEntityIds(v).includes(f.targetId);
+    case "scalar-equals": {
+      const val = readScalar(v);
+      if (val === null || val === undefined) return false;
+      if (typeof f.value === "string") return normalize(String(val)) === normalize(f.value);
+      return val === f.value;
+    }
+  }
+}
+
+// --- Sort ------------------------------------------------------------------
+
+/** Comparable sort key for a typed value; null = missing (sorts last). */
+export function sortKey(v: any): number | string | null {
+  if (!v || typeof v.type !== "string") return null;
+  switch (v.type) {
+    case "date": {
+      const d = readDate(v);
+      if (!d || !d.start) return null;
+      const ms = Date.parse(d.start);
+      return Number.isNaN(ms) ? null : ms;
+    }
+    case "number": {
+      const val = readScalar(v);
+      return typeof val === "number" ? val : null;
+    }
+    case "boolean": {
+      const val = readScalar(v);
+      return typeof val === "boolean" ? (val ? 1 : 0) : null;
+    }
+    case "label": {
+      const names = readLabels(v).map(o => o.name);
+      return names.length ? names.join(", ") : null;
+    }
+    case "entity": {
+      const ids = readEntityIds(v);
+      return ids.length ? ids.join(", ") : null;
+    }
+    default: {
+      const val = readScalar(v);
+      return val === null || val === undefined ? null : String(val);
+    }
+  }
+}
+
+export function compareForSort(
+  a: number | string | null,
+  b: number | string | null,
+  order: "asc" | "desc"
+): number {
+  const aNull = a === null;
+  const bNull = b === null;
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;   // missing always last, regardless of order
+  if (bNull) return -1;
+  let cmp: number;
+  if (typeof a === "number" && typeof b === "number") {
+    cmp = a - b;
+  } else {
+    const sa = String(a);
+    const sb = String(b);
+    cmp = sa < sb ? -1 : sa > sb ? 1 : 0;
+  }
+  return order === "asc" ? cmp : -cmp;
+}
+
+// --- Structure resolution (name or id) -------------------------------------
+
+export function resolveStructure(
+  structures: CapacitiesStructure[],
+  param: string
+): { structure: CapacitiesStructure } | { problem: string } {
+  const byId = structures.find(s => s.id === param); // built-in ids (RootTask…) match here
+  if (byId) return { structure: byId };
+  const norm = normalize(param);
+  const byName = structures.filter(
+    s => normalize(s.title) === norm || normalize(s.pluralName) === norm
+  );
+  if (byName.length === 1) return { structure: byName[0] };
+  if (byName.length > 1) {
+    return { problem: `structure "${param}" is ambiguous — matches ${byName.length} types by name; use the structure id` };
+  }
+  const available = structures.map(s => `${s.title} (${s.id})`).join(", ");
+  return { problem: `unknown structure "${param}". Available: ${available}` };
+}
+
+// --- Filter/sort input schema + compilation --------------------------------
+
+// A filter value is a scalar (equals) or a date range object {after?, before?}.
+export const filterValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.object({ after: z.string().optional(), before: z.string().optional() })
+]);
+export type FilterValue = z.infer<typeof filterValueSchema>;
+
+// Detects a time component in an ISO string (e.g. "2026-07-13T09:00"); a bare
+// "2026-07-13" is treated as day-granularity (matches any time that day).
+function hasTimeComponent(s: string): boolean {
+  return /\d{4}-\d{2}-\d{2}[T ]\d/.test(s);
+}
+
+/**
+ * Resolves each filter key (name-or-id) to a property def, picks the operator
+ * from the def's type, and validates the value. Entity-typed filters resolve
+ * their NAME → object id via resolveEntities (a title search, paced by `pace`).
+ * Accumulates problems; never guesses.
+ */
+export async function compileFilters(
+  client: CapacitiesClient,
+  index: PropertyIndex,
+  filters: Record<string, FilterValue> | undefined,
+  pace: WaitBudget
+): Promise<{ compiled: CompiledFilter[]; problems: string[] }> {
+  const compiled: CompiledFilter[] = [];
+  const problems: string[] = [];
+
+  for (const [key, raw] of Object.entries(filters ?? {})) {
+    const resolved = resolvePropertyKey(index, key);
+    if ("problem" in resolved) { problems.push(resolved.problem); continue; }
+    const def = resolved.def;
+    const isRange = typeof raw === "object" && raw !== null;
+
+    if (def.type === "date") {
+      if (isRange) {
+        const r = raw as { after?: string; before?: string };
+        if (r.after === undefined && r.before === undefined) {
+          problems.push(`filter \`${key}\` range needs at least one of after/before`);
+          continue;
+        }
+        let afterMs: number | null = null;
+        let beforeMs: number | null = null;
+        if (r.after !== undefined) {
+          afterMs = parseFilterDate(r.after);
+          if (Number.isNaN(afterMs)) { problems.push(`filter \`${key}\` after ${INVALID_DATE}: ${r.after}`); continue; }
+        }
+        if (r.before !== undefined) {
+          beforeMs = parseFilterDate(r.before);
+          if (Number.isNaN(beforeMs)) { problems.push(`filter \`${key}\` before ${INVALID_DATE}: ${r.before}`); continue; }
+        }
+        compiled.push({ propId: def.id, propName: def.name, kind: "date-range", afterMs, beforeMs });
+      } else {
+        const s = String(raw);
+        const instant = parseFilterDate(s);
+        if (Number.isNaN(instant)) { problems.push(`filter \`${key}\` ${INVALID_DATE}: ${s}`); continue; }
+        compiled.push({ propId: def.id, propName: def.name, kind: "date-equals", day: dayOf(s), hasTime: hasTimeComponent(s), instant });
+      }
+      continue;
+    }
+
+    if (isRange) {
+      problems.push(`filter \`${key}\`: after/before ranges are only valid for date properties`);
+      continue;
+    }
+
+    if (def.type === "label") {
+      const options = def.labelSet ?? [];
+      const opt = options.find(o => normalize(o.name) === normalize(String(raw)));
+      if (!opt) {
+        const valid = options.map(o => o.name).join(", ");
+        problems.push(`filter \`${key}\`: unknown option \`${String(raw)}\`; valid: ${valid}`);
+        continue;
+      }
+      compiled.push({ propId: def.id, propName: def.name, kind: "label-equals", optionId: opt.id, optionName: opt.name });
+      continue;
+    }
+
+    if (def.type === "entity") {
+      const name = String(raw);
+      // Entity/tag values in GET /object JSON are id-only (A5), so a name filter
+      // must resolve NAME → id via a title search scoped to the relation's targets.
+      const r = await resolveEntities(client, [name], def.allowedStructures, { pace });
+      if (r.ambiguous.length > 0) {
+        const cands = r.ambiguous[0].candidates.map(c => `${c.title} (${c.id})`).join(", ");
+        problems.push(`filter \`${key}\`: \`${name}\` is ambiguous: ${cands}`);
+        continue;
+      }
+      if (r.truncated.length > 0) {
+        problems.push(`filter \`${key}\`: could not confirm \`${name}\` — the title search returned the maximum ${SEARCH_LIMIT} results with no exact match; use a more specific name`);
+        continue;
+      }
+      if (r.linked.length !== 1) {
+        problems.push(`filter \`${key}\`: no object named \`${name}\` to filter on`);
+        continue;
+      }
+      compiled.push({ propId: def.id, propName: def.name, kind: "entity-equals", targetId: r.linked[0].id, targetName: name });
+      continue;
+    }
+
+    // scalar (text / url / number / boolean / title)
+    if (def.type === "number") {
+      const n = Number(raw);
+      if (Number.isNaN(n)) { problems.push(`filter \`${key}\` value is not a number: ${String(raw)}`); continue; }
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: n });
+      continue;
+    }
+    if (def.type === "boolean") {
+      let b: boolean;
+      if (typeof raw === "boolean") b = raw;
+      else if (String(raw).toLowerCase() === "true") b = true;
+      else if (String(raw).toLowerCase() === "false") b = false;
+      else { problems.push(`filter \`${key}\` value is not a boolean: ${String(raw)}`); continue; }
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: b });
+      continue;
+    }
+    if (def.type === "text" || def.type === "url" || def.type === "title") {
+      compiled.push({ propId: def.id, propName: def.name, kind: "scalar-equals", value: String(raw) });
+      continue;
+    }
+
+    problems.push(`filter \`${key}\`: cannot filter on property type \`${def.type}\``);
+  }
+
+  return { compiled, problems };
+}
+
+export interface CompiledSort { propId: string; propName: string; order: "asc" | "desc"; }
+
+export function compileSort(
+  index: PropertyIndex,
+  sort: { by: string; order: "asc" | "desc" } | undefined
+): { sort: CompiledSort | null; problems: string[] } {
+  if (!sort) return { sort: null, problems: [] };
+  const resolved = resolvePropertyKey(index, sort.by);
+  if ("problem" in resolved) return { sort: null, problems: [resolved.problem] };
+  return { sort: { propId: resolved.def.id, propName: resolved.def.name, order: sort.order }, problems: [] };
+}
