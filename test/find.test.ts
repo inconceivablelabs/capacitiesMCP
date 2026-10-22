@@ -377,16 +377,18 @@ test("find_objects: tag-equals resolves name→id (search scoped to RootTag) the
   assert.match(res.content[0].text, /ID: m1/);
 });
 
-test("find_objects: an escalated seed of 50 with fetch_cap 50 still takes exactly one bounded window sleep", async () => {
+test("find_objects: an escalated seed of 50 with fetch_cap 50 is clamped to 42 GETs by the request budget and still crosses the object window once", async () => {
   // The 31st GET crosses the 30/60s object window; acquireWithWait sleeps once.
   // Inject a fake clock so that sleep resolves instantly instead of ~60s.
   const clock = fakeClock();
   const handler = getFind(clock);
   const fifty = summaries(1, 50, n => `Note ${n}`);
-  installFind(enumRouter({ base: { search: { Note: fifty } }, structurePages: { meeting: pagesOf(fifty) } }));
+  const calls = installFind(enumRouter({ base: { search: { Note: fifty } }, structurePages: { meeting: pagesOf(fifty) } }));
   const res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 50, sort: { by: "Date", order: "asc" } });
   assert.equal(res.isError, undefined);
   assert.equal(res.structuredContent.seed_method, "search+enumeration", "a raw seed of 50 escalates (M3)");
+  // 45 − space − search − 1 listing page = 42 > 30, so one window wait.
+  assert.equal(fetchedIds(calls).length, 42);
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep for the 31st fetch");
   assert.doesNotMatch(res.content[0].text, /returned the maximum 50/);
 });
@@ -1365,7 +1367,10 @@ test("find_objects: the per-call request budget clamps page_budget and fetch_cap
     { name: "structure + entity filter", args: { sort: SORT_DATE_DESC, filters: { Tags: "product" } }, base: { search: { product: TAG_HIT } }, pages: 13 }
   ];
   for (const c of cases) {
-    const handler = getFind();
+    // Fake clock: 30 GETs equals the object window, so on a real clock an
+    // over-allocation would wait 60s and then rate-stop at exactly 30.
+    const clock = fakeClock();
+    const handler = getFind(clock);
     const calls = installFind(enumRouter({ base: c.base, structurePages: { meeting: pagesOf(big) } }));
     const res = await handler({ structure: "Meeting", page_budget: 25, fetch_cap: 50, ...c.args });
     assert.equal(res.isError, undefined, c.name);
@@ -1374,6 +1379,7 @@ test("find_objects: the per-call request budget clamps page_budget and fetch_cap
     assert.match(text, new RegExp(`^Note: listing stopped at the page budget \\(${c.pages} pages, clamped from 25 by the per-call request budget of 45\\)`, "m"), c.name);
     assert.match(text, /^Note: fetched the first 30 of \d+ candidates \(per-call request budget of 45\)/m, c.name);
     assert.ok(calls.length <= MAX_REQUESTS_PER_CALL, `${c.name}: ${calls.length} requests`);
+    assert.deepEqual(clock.sleeps, [], `${c.name}: the budget, not a window wait, held the GETs to 30`);
   }
 });
 
@@ -1428,7 +1434,10 @@ test("find_objects: a 6th relation filter is rejected before any search, naming 
 });
 
 test("find_objects: five relation filters plus a label and a date filter are accepted, and the worst case is exactly 45 requests (D2)", async () => {
-  const handler = getFind();
+  // Fake clock: 30 GETs equals the object window, so on a real clock an
+  // over-allocation would wait 60s and then rate-stop at exactly 30.
+  const clock = fakeClock();
+  const handler = getFind(clock);
   const filters = { Rel1: "product", Rel2: "product", Rel3: "product", Rel4: "product", Rel5: "product",
                     Status: "Done", Date: { after: "2020-01-01" } };
   const calls = installFind(enumRouter({
@@ -1442,6 +1451,7 @@ test("find_objects: five relation filters plus a label and a date filter are acc
   assert.equal(enumCalls(calls).length, 8);
   assert.equal(fetchedIds(calls).length, 30);
   assert.equal(calls.length, MAX_REQUESTS_PER_CALL);
+  assert.deepEqual(clock.sleeps, [], "30 GETs and no wait: the budget's doing, not the limiter's");
 });
 
 test("find_objects: a listing call that FAILED still counts against the request budget (requestsIssued, not pagesRead)", async () => {
