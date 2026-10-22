@@ -74,7 +74,12 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   was not isolated (cap-ul0). `content[0]` stays the human text. The full answer needs both flags true
   AND `matched === returned`. **Output contract:** a `Note:` line means incomplete, and the phrase
   `checked N of M candidates` is reserved for the stage-2 rate-budget Note (PA parses both).
-  Returns NO bodies (compose with `get_object`); no persistent state.
+  Returns NO bodies (compose with `get_object`); no persistent state. **Stage-2 circuit breaker**
+  (cap-fvb): a 403 or 401 stops the reads at once; otherwise 3 read errors with no success between
+  them stop it (a 404 neither counts nor resets — a deleted candidate). Code layout (cap-0ot):
+  `find.ts` is the schema + orchestration and re-exports everything; `find/seed.ts` (stage 1),
+  `find/stage2.ts` (reads + filter/sort), `find/query.ts` (filter/sort compile + match),
+  `find/render.ts` (all output text, Notes, the `content[1]` block), `find/shared.ts`.
 - **`enumerate.ts`**: `enumerateAll` — walks `/objects/structure|tag` pages by cursor up to a page
   budget, dedupes by id, and reports `complete` (last page said `hasMore:false`), `stopReason`,
   `pagesRead` and `requestsIssued`. Rate-limit, API and network errors end it as a partial; only
@@ -98,6 +103,10 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 - **title-date.ts**: `parseTitleDate` (leftmost `YYYY-MM-DD`, `May 19, 2026` or `3/18/26` date in a
   title) and `orderEnumerated` (dated first by date, then undated, stable) — orders listed
   candidates before `find_objects` cuts them.
+- **error-text.ts**: shapes a server error body for the MESSAGE (cap-dnf): JSON kept (capped at
+  2,000 chars), anything else cut to its first non-blank line (200 code points); the reserved
+  `checked N of M candidates` phrase is neutralised in any server text, matched as widely as PA's
+  Python regex (Unicode digits/whitespace, K/ſ/ı/İ folding). `details.body` stays raw.
 
 ### The object model (properties vs. body)
 
@@ -127,7 +136,12 @@ Objects have two content layers, handled differently — this is the central men
 ### Error Handling
 - `CapacitiesAPIError(code, message, details)` — codes `RATE_LIMIT_EXCEEDED`,
   `AUTHENTICATION_FAILED`, `API_ERROR`. On any non-ok response the **HTTP body is read and
-  surfaced** in the message + `details.body`, so the LLM can self-correct on 400s.
+  surfaced** — shaped by `utils/error-text.ts` in the message (a JSON 400 survives whole, so the LLM
+  can self-correct; an HTML page becomes one line), raw in `details.body`. A **403** whose body
+  carries Cloudflare ban wording (first 8 KB, bounded regex) is raised as `RATE_LIMIT_EXCEEDED`;
+  every other status keeps its class and its `API error NNN:` prefix. **PA keys on these
+  prefixes**: "Rate limit exceeded" → retry, "API error 5…" → a write may have applied, never
+  retry. Never turn a 5xx into a rate limit (cap-dnf delta D2, 2026-10-22).
 - `create_object`/`update_object` **validate fully before writing** (fail-before-create): all
   input problems are returned as one error with nothing written, and relation auto-creation is
   deferred past the problem gate so a late failure never orphans an auto-created entity.

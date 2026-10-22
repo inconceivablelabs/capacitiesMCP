@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "capacities-mcp-server",
   "display_name": "Capacities MCP Server",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Capacities v2 knowledge management integration: search, object CRUD, weblink capture, and daily notes. Runs on the Capacities v2 REST API.",
   "author": {
     "name": "Tom Booth",
