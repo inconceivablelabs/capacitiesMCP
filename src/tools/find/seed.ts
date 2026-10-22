@@ -133,18 +133,21 @@ export async function seedCandidates(
       { query: titleHint, structureIds: [struct.id], limit: SEARCH_LIMIT },
       budget
     );
-    // cap-1kc: the search also returns objects related BY MEANING, interleaved
-    // by relevance — a semantic extra can be a newer dated object and win a
-    // sort-desc + limit-1. Keep only title matches.
-    const titleSeed = seed.filter(r => matchesTitle(r.title, titleHint));
+    // Keep only this structure's hits rather than trust the server to honour
+    // structureIds (cap-0ot). cap-1kc: the search also returns objects related BY
+    // MEANING, interleaved by relevance — a semantic extra can be a newer dated
+    // object and win a sort-desc + limit-1. Keep only title matches.
+    const scoped = inStructureMatching(seed, struct.id, undefined);
+    const titleSeed = scoped.filter(r => matchesTitle(r.title, titleHint));
     const header = (n: number, stamp: string) => `Found ${n} ${plural} matching "${titleHint}" (live as of ${stamp}):`;
     const noneText = (stamp: string) => `No ${plural} found with a title matching "${titleHint}" (live as of ${stamp}).`;
 
-    // Saturation is judged on the RAW count: at the cap a title match may sit
+    // Saturation is judged on the RAW count (foreign hits too, since they fill the
+    // server's 50 as well): at the cap a title match may sit
     // beyond it whatever the filter kept, so list the whole structure instead
     // and filter that (cap-i93 U3/U8).
     if (seed.length < SEARCH_LIMIT) {
-      const droppedCount = seed.length - titleSeed.length;
+      const droppedCount = scoped.length - titleSeed.length;
       if (droppedCount > 0) infoLines.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${titleHint}" — Capacities search also returns matches by meaning.)`);
       return {
         method: "search", complete: true, candidates: titleSeed, header, noneText,

@@ -67,3 +67,25 @@ test("firstLineBrief: first non-blank line, capped, neutralised; empty → empty
   assert.equal(firstLineBrief(undefined, 200), "");
   assert.doesNotMatch(firstLineBrief("checked 1 of 1 candidates", 200), PA_COUNTS_RE);
 });
+
+// cap-0ot (e): a pretty-printed JSON body in an error MESSAGE would otherwise brief to "{".
+test("firstLineBrief: JSON after an 'API error NNN: ' or 'Rate limit exceeded: ' prefix is compacted before the first line is taken", () => {
+  const pretty = JSON.stringify({ code: "bad_request", details: [{ path: "id" }] }, null, 2);
+  assert.ok(pretty.includes("\n"), "fixture is multi-line");
+  assert.equal(firstLineBrief(`API error 400: ${pretty}`, 200), 'API error 400: {"code":"bad_request","details":[{"path":"id"}]}');
+  assert.equal(firstLineBrief(`Rate limit exceeded: ${pretty}`, 200), 'Rate limit exceeded: {"code":"bad_request","details":[{"path":"id"}]}');
+});
+
+test("firstLineBrief: compacted JSON is still capped at the code-point limit and count-neutralised", () => {
+  const pretty = JSON.stringify({ msg: "checked 3 of 9 candidates", pad: "x".repeat(400) }, null, 2);
+  const out = firstLineBrief(`API error 400: ${pretty}`, 200);
+  assert.equal(codePoints(out), 201);
+  assert.ok(out.endsWith("…"));
+  assert.ok(out.startsWith('API error 400: {"msg":'), out.slice(0, 40));
+  assert.doesNotMatch(out, PA_COUNTS_RE);
+});
+
+test("firstLineBrief: non-JSON after the prefix, and a JSON scalar, keep the first-line behaviour", () => {
+  assert.equal(firstLineBrief("API error 503: <!doctype html>\n<p>x</p>", 200), "API error 503: <!doctype html>");
+  assert.equal(firstLineBrief('API error 500: "boom"\nmore', 200), 'API error 500: "boom"');
+});

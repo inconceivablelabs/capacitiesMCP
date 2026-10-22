@@ -23,10 +23,22 @@ function capCodePoints(text: string, max: number): string {
   return points.length > max ? points.slice(0, max).join("") + "…" : text;
 }
 
+// The prefixes CapacitiesClient puts before a shaped body in an error message.
+const ERROR_MESSAGE_PREFIX = /^(API error \d+|Rate limit exceeded): /;
+
+// A pretty-printed JSON body after an error prefix would brief to its first line,
+// a lone "{" (cap-0ot). Compact it to one line first; anything else is unchanged.
+function compactPrefixedJson(text: string): string {
+  const prefix = ERROR_MESSAGE_PREFIX.exec(text)?.[0];
+  if (prefix === undefined) return text;
+  const rest = text.slice(prefix.length);
+  return isJsonDocument(rest) ? prefix + JSON.stringify(JSON.parse(rest)) : text;
+}
+
 // The first non-blank line, trimmed, neutralised and capped; "" when there is none.
 // Splits on every line-ending style — a CR-only body is otherwise one long line.
 export function firstLineBrief(text: string | undefined, max: number): string {
-  const line = (text ?? "").split(/\r\n|\r|\n/).map(l => l.trim()).find(l => l !== "") ?? "";
+  const line = compactPrefixedJson(text ?? "").split(/\r\n|\r|\n/).map(l => l.trim()).find(l => l !== "") ?? "";
   return capCodePoints(neutraliseCountPhrase(line), max);
 }
 

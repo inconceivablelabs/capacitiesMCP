@@ -189,7 +189,7 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
 
 // === find_objects tool (mocked fetch, node --test) =========================
 
-import { setupFindTools, PAGE_BUDGET_MAX, PAGE_BUDGET_DEFAULT, MAX_REQUESTS_PER_CALL } from "../src/tools/find.js";
+import { setupFindTools, PAGE_BUDGET_MAX, PAGE_BUDGET_DEFAULT, MAX_REQUESTS_PER_CALL, FETCH_CAP_MAX } from "../src/tools/find.js";
 
 interface FCall { url: string; opts: any; }
 function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
@@ -2076,4 +2076,106 @@ test("find_objects: a listing error Note skips leading blank lines, splits CR-on
     assert.ok(!out.includes("LATER-LINE-MARKER"), `${name}: no later line`);
     assert.doesNotMatch(out, PA_COUNTS_RE, `${name}: no count phrase anywhere`);
   }
+});
+
+// === cap-0ot: minors parked during the split ===============================
+
+// IDs of the rendered rows, in output order.
+const rowIds = (text: string) => [...text.matchAll(/^ID: (\S+)$/gm)].map(m => m[1]);
+
+test("find_objects: a search hit of another structure is never a candidate — plain search path (cap-0ot a)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({ search: { Retro: [
+    { id: "m1", title: "Retro 1", structureId: "meeting" },
+    { id: "p1", title: "Retro notes", structureId: "page" },   // the server ignored structureIds
+    { id: "m2", title: "Retro 2", structureId: "meeting" }
+  ] } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "the foreign hit is never fetched");
+  assert.ok(!res.content[0].text.includes("p1"), "nor shown");
+  assert.equal(exactnessOf(res).seed_size, 2);
+
+  // Zero-GET path too: the foreign hit is not listed.
+  const h2 = getFind();
+  installFind(findRouter({ search: { Retro: [
+    { id: "m1", title: "Retro 1", structureId: "meeting" },
+    { id: "p1", title: "Retro notes", structureId: "page" }
+  ] } }));
+  const res2 = await h2({ structure: "Meeting", title_hint: "Retro" });
+  assert.deepEqual(rowIds(res2.content[0].text), ["m1"]);
+  assert.equal(exactnessOf(res2).seed_size, 1);
+});
+
+test("find_objects: a search hit of another structure is never a candidate — escalated-union path (cap-0ot a)", async () => {
+  const handler = getFind();
+  // 50 raw hits, so the search escalates; the listing (partial) holds none of them.
+  const search = [
+    ...summaries(1001, 1048, n => `Retro ${n}`),
+    { id: uid(1049), title: "Retro foreign", structureId: "page" },
+    ...summaries(1050, 1050, n => `Retro ${n}`)
+  ];
+  const listing = summaries(1, 200, n => `Other ${n}`);
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 1, limit: 100 });
+  assert.equal(res.isError, undefined);
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration", "fixture: the search escalated");
+  const ids = rowIds(res.content[0].text);
+  assert.ok(ids.includes(uid(1050)), "an in-structure search hit is kept");
+  assert.ok(!ids.includes(uid(1049)), "the foreign search hit is not");
+  assert.equal(exactnessOf(res).seed_size, 49);
+});
+
+test("find_objects: the escalated union lists listing rows first, then search-only hits in search order (cap-0ot b)", async () => {
+  const handler = getFind();
+  // Undated titles, so title-date ordering is a stable no-op and the union order shows.
+  const search = summaries(1001, 1050, n => `Retro ${n}`).reverse();   // rank order != id order
+  const listing = [...summaries(1, 3, n => `Retro ${n}`), ...summaries(4, 150, n => `Other ${n}`)];
+  installFind(enumRouter({ base: { search: { Retro: search } }, structurePages: { meeting: pagesOf(listing) } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", page_budget: 1, limit: 100 });
+  assert.equal(exactnessOf(res).seed_method, "search+enumeration", "fixture: the search escalated");
+  assert.deepEqual(rowIds(res.content[0].text), [uid(1), uid(2), uid(3), ...search.map(h => h.id)]);
+});
+
+test("find_objects: a direct call with limit NaN behaves like an omitted limit on both paths (cap-0ot c)", async () => {
+  const rows = summaries(1, 40, n => `Sync - ${new Date(Date.UTC(2025, 0, n)).toISOString().slice(0, 10)}`);
+  // Zero-GET path: the default row cap, with its Note.
+  for (const limit of [undefined, NaN]) {
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: pagesOf(rows) } }));
+    const res = await handler({ structure: "Meeting", limit });
+    const text = res.content[0].text;
+    assert.match(text, /^Found 30 Meetings/, `limit ${limit}`);
+    assert.match(text, /^Note: showing the first 30 of 40 matching Meetings \(limit\)/m, `limit ${limit}`);
+    assert.equal(exactnessOf(res).returned, 30, `limit ${limit}`);
+  }
+  // Stage-2 path: no slice at all.
+  for (const limit of [undefined, NaN]) {
+    const handler = getFind(fakeClock());
+    installFind(enumRouter({ structurePages: { meeting: pagesOf(rows.slice(0, 10)) } }));
+    const res = await handler({ structure: "Meeting", sort: SORT_DATE_DESC, limit });
+    assert.match(res.content[0].text, /^Found 10 Meetings/, `limit ${limit}`);
+    assert.equal(exactnessOf(res).returned, 10, `limit ${limit}`);
+    assert.equal(exactnessOf(res).matched, 10, `limit ${limit}`);
+  }
+});
+
+test("find_objects: a direct call with fetch_cap 500 fetches at most FETCH_CAP_MAX (cap-0ot d)", async () => {
+  const clock = fakeClock();
+  const handler = getFind(clock);
+  const calls = installFind(enumRouter({ base: { search: { Retro: summaries(1, 49, n => `Retro ${n}`) } } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", fetch_cap: 500, sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.ok(fetchedIds(calls).length <= FETCH_CAP_MAX, `${fetchedIds(calls).length} GETs`);
+});
+
+test("find_objects: a pretty-printed JSON error body reaches a Note compacted, not as a lone '{' (cap-0ot e)", async () => {
+  const handler = getFind();
+  const body = JSON.stringify({ code: "bad_request", message: "nope", details: [{ path: "id" }] }, null, 2);
+  assert.ok(body.includes("\n"), "fixture is multi-line");
+  const fail = { status: 400, text: body };
+  installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: fail, m2: fail, m3: fail } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 consecutive read errors \(API error 400: \{"code":"bad_request","message":"nope","details":\[\{"path":"id"\}\]\}\); results may be incomplete\.$/m);
 });

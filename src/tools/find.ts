@@ -117,6 +117,9 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           return { content: [{ type: "text", text: `tag is ${tag.length} characters; the maximum is ${TITLE_HINT_MAX}.` }], isError: true };
         }
         const pageBudget = clampCount(page_budget, PAGE_BUDGET_DEFAULT, PAGE_BUDGET_MAX);
+        // Like page_budget and fetch_cap, a direct call can pass a non-finite limit
+        // (A11); NaN would slice every row away, so it counts as omitted (cap-0ot).
+        const rowLimit = limit !== undefined && Number.isFinite(limit) ? limit : undefined;
 
         // 1. Resolve the structure (space bucket — one call, reused).
         const { structures } = await client.getSpaceInfo();
@@ -194,7 +197,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         };
 
         // Short-circuit: nothing to filter or sort on means nothing to surface.
-        if (shortCircuit) return renderShortCircuit(seed, candidates, limit, ordering);
+        if (shortCircuit) return renderShortCircuit(seed, candidates, rowLimit, ordering);
 
         // 4. Fetch candidates (object bucket, paced), up to fetch_cap, in the order
         //    above. A listing call gets what is left of the request budget
@@ -207,11 +210,11 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const outcome = await fetchCandidates(client, candidates, planned, budget);
 
         // 5-6. Filter client-side over the typed JSON values, sort, then limit.
-        const { matches, matchedCount } = filterAndSort(outcome.fetched, compiled, compiledSort, limit);
+        const { matches, matchedCount } = filterAndSort(outcome.fetched, compiled, compiledSort, rowLimit);
 
         // 7. Render.
         return renderStage2(seed, {
-          seedSize, planned, fetchAllowance, cap, limit, compiled, compiledSort, outcome, matches, matchedCount
+          seedSize, planned, fetchAllowance, cap, limit: rowLimit, compiled, compiledSort, outcome, matches, matchedCount
         }, ordering);
       } catch (error) {
         const message = error instanceof CapacitiesAPIError ? error.message : error instanceof Error ? error.message : String(error);
