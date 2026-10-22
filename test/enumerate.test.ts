@@ -124,6 +124,7 @@ test("enumerateAll: an unreadable page (HTML 200, or a 500) ENDS the listing as 
     assert.equal(r.results.length, 100, `${name}: keeps what it read`);
     assert.equal(r.complete, false, name);
     assert.equal(r.stopReason, "error", name);
+    assert.equal(r.requestsIssued, calls.length, `${name}: the failed request is counted`);
     assert.match(r.errorMessage ?? "", name === "html 200" ? /not a valid enumeration page/ : /API error 500/, name);
   }
 });
@@ -135,6 +136,7 @@ test("enumerateAll: a 429 on page 1 is a rate-limited partial with zero results,
   assert.deepEqual(r.results, []);
   assert.equal(r.complete, false);
   assert.equal(r.stopReason, "rate-limit");
+  assert.equal(r.requestsIssued, calls.length, "the failed request is counted");
 });
 
 test("enumerateAll never sleeps: a full enumerate window ends the listing as rate-limited instead of waiting", async () => {
@@ -154,4 +156,42 @@ test("enumerateAll rethrows an authentication failure — a bad token is not a p
     enumerateAll(client(), "structure", "meeting", 12),
     (e: any) => e instanceof CapacitiesAPIError && e.code === "AUTHENTICATION_FAILED"
   );
+});
+
+test("enumerateAll: a network TypeError on page 3 ends as a partial, keeping pages 1-2 and counting the request", async () => {
+  const calls = installPages([
+    { results: rows(1, 100), nextCursor: uid(100), hasMore: true },
+    { results: rows(101, 200), nextCursor: uid(200), hasMore: true },
+    () => { throw new TypeError("fetch failed"); }
+  ]);
+  const r = await enumerateAll(client(), "structure", "meeting", 12);
+  assert.equal(calls.length, 3);
+  assert.equal(r.results.length, 200);
+  assert.equal(r.complete, false);
+  assert.equal(r.stopReason, "error");
+  assert.equal(r.requestsIssued, 3);
+  assert.match(r.errorMessage ?? "", /fetch failed/);
+});
+
+test("enumerateAll: a 401 on page 2 still rejects with AUTHENTICATION_FAILED (rows are not returned)", async () => {
+  installPages([
+    { results: rows(1, 100), nextCursor: uid(100), hasMore: true },
+    () => resp("bad token", 401, "text/plain")
+  ]);
+  await assert.rejects(
+    enumerateAll(client(), "structure", "meeting", 12),
+    (e: any) => e instanceof CapacitiesAPIError && e.code === "AUTHENTICATION_FAILED"
+  );
+});
+
+test("enumerateAll: a malformed row on page 2 ends as a partial keeping page 1", async () => {
+  installPages([
+    { results: rows(1, 100), nextCursor: uid(100), hasMore: true },
+    { results: [...rows(101, 150), null], nextCursor: null, hasMore: false }
+  ]);
+  const r = await enumerateAll(client(), "structure", "meeting", 12);
+  assert.equal(r.results.length, 100);
+  assert.equal(r.complete, false);
+  assert.equal(r.stopReason, "error");
+  assert.match(r.errorMessage ?? "", /not a valid enumeration page/);
 });

@@ -50,6 +50,10 @@ export async function enumerateAll(
         if (e.code === "RATE_LIMIT_EXCEEDED") return finish(false, "rate-limit", e.message);
         if (e.code === "API_ERROR") return finish(false, "error", e.message);
       }
+      if (!(e instanceof CapacitiesAPIError)) {
+        // Network failure etc.: end as a partial so rows and the request count survive.
+        return finish(false, "error", e instanceof Error ? e.message : String(e));
+      }
       throw e;
     }
     pagesRead++;

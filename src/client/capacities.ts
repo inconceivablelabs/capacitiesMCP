@@ -193,7 +193,8 @@ export class CapacitiesClient {
       typeof page === "object" &&
       Array.isArray(page.results) &&
       typeof page.hasMore === "boolean" &&
-      (page.nextCursor === null || typeof page.nextCursor === "string")
+      (page.nextCursor === null || typeof page.nextCursor === "string") &&
+      page.results.every(isEnumerationRow)
     ) {
       return { results: page.results, nextCursor: page.nextCursor, hasMore: page.hasMore };
     }
@@ -312,6 +313,16 @@ export class CapacitiesClient {
       })
     });
   }
+}
+
+// Row check for enumerateObjects. The spec's row schema is `required: [id, structureId,
+// title]` (https://developers.capacities.io/openapi.json, /objects/structure 200). Only
+// id and structureId are enforced: title is exempt because existing code tolerates null
+// titles from search and real spaces contain empty ones.
+function isEnumerationRow(row: unknown): boolean {
+  if (row === null || typeof row !== "object") return false;
+  const r = row as { id?: unknown; structureId?: unknown };
+  return typeof r.id === "string" && r.id !== "" && typeof r.structureId === "string";
 }
 
 type EndpointType = "space" | "search" | "weblink" | "object" | "blocks" | "enumerate";

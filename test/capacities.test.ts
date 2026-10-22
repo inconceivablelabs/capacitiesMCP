@@ -681,3 +681,25 @@ test("enumerateObjects: pace is forwarded — a full enumerate window sleeps one
   assert.deepEqual(clock.sleeps, [60000], "exactly one bounded one-window sleep");
   assert.equal(budget.remainingMs, 0);
 });
+
+test("enumerateObjects: a malformed ROW (null, no id, non-string structureId) throws; a null title is accepted", async () => {
+  const client: any = newClient();
+  const ok = { id: "00000000-0000-4000-8000-000000000001", structureId: "meeting", title: "T" };
+  const bad: [string, unknown][] = [
+    ["null row", null],
+    ["row without id", { structureId: "meeting", title: "T" }],
+    ["row with empty id", { ...ok, id: "" }],
+    ["row with non-string structureId", { ...ok, structureId: 7 }]
+  ];
+  for (const [name, row] of bad) {
+    installFetch(() => makeResponse({ body: { results: [ok, row], nextCursor: null, hasMore: false } }));
+    const err: any = await client.enumerateObjects("structure", "meeting").then(() => null, (e: unknown) => e);
+    assert.ok(err instanceof CapacitiesAPIError, `${name}: must throw`);
+    assert.equal(err.code, "API_ERROR", name);
+    assert.match(err.message, /not a valid enumeration page/, name);
+  }
+  // Known-negative: a null title is tolerated.
+  const nullTitle = { ...ok, title: null };
+  installFetch(() => makeResponse({ body: { results: [nullTitle], nextCursor: null, hasMore: false } }));
+  assert.equal((await client.enumerateObjects("structure", "meeting")).results.length, 1);
+});
