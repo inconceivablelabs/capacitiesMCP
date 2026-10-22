@@ -13,10 +13,18 @@ import { normalizeName as normalize } from "../../utils/normalize.js";
 // Date.parse alone accepts "2026", "2026-07" and "July 4 2026"; a date-equals
 // filter compiled from one has no YYYY-MM-DD day and silently matches nothing
 // (cap-9ti). Require the ISO day prefix, then let Date.parse reject the rest.
-const ISO_DAY_PREFIX = /^\d{4}-\d{2}-\d{2}/;
+const ISO_DAY_PREFIX = /^(\d{4})-(\d{2})-(\d{2})/;
 const INVALID_DATE = "is not a valid ISO date (YYYY-MM-DD or full timestamp)";
 function parseFilterDate(s: string): number {
-  return ISO_DAY_PREFIX.test(s) ? Date.parse(s) : NaN;
+  const m = ISO_DAY_PREFIX.exec(s);
+  if (!m || !isRealDay(Number(m[1]), Number(m[2]), Number(m[3]))) return NaN;
+  return Date.parse(s);
+}
+// V8's Date.parse rolls an impossible day over ("2026-02-30" → March 2) rather
+// than rejecting it, so the day must round-trip through Date.UTC (cap-9ti M2).
+function isRealDay(y: number, m: number, d: number): boolean {
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
 }
 
 // --- Read-shape value extractors -------------------------------------------

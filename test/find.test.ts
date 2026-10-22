@@ -2041,12 +2041,37 @@ test("compileFilters: YYYY-MM-DD and a full timestamp still compile for equals, 
   assert.equal((compiled[0] as any).day, "2026-07-04");
 });
 
-test("compileFilters: a well-shaped but impossible date is still rejected by Date.parse (cap-9ti)", async () => {
+test("compileFilters: an out-of-range month (2026-13-45) is rejected by Date.parse (cap-9ti)", async () => {
   installSearch({});
   const idx = buildPropertyIndex(meetingStructure());
   const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-13-45" }, { remainingMs: 60000 });
   assert.deepEqual(compiled, []);
   assert.match(problems[0], /is not a valid ISO date/);
+});
+
+// cap-9ti review M2: V8's Date.parse rolls an impossible day over
+// ("2026-02-30" → 2026-03-02) instead of rejecting it.
+test("compileFilters: a day that does not exist in its month is a problem for equals, after and before (M2)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const bad of ["2026-02-30", "2026-02-29", "2026-04-31", "2026-02-30T09:00:00Z"]) {
+    assert.ok(!Number.isNaN(Date.parse(bad)), `fixture: Date.parse accepts ${bad} (else the test proves nothing)`);
+    for (const value of [bad, { after: bad }, { before: bad }]) {
+      const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+      assert.deepEqual(compiled, [], `${JSON.stringify(value)} must not compile`);
+      assert.match(problems.join("\n"), /is not a valid ISO date \(YYYY-MM-DD or full timestamp\): /);
+    }
+  }
+});
+
+test("compileFilters: a leap day in a leap year compiles (M2)", async () => {
+  installSearch({});
+  const idx = buildPropertyIndex(meetingStructure());
+  for (const value of ["2024-02-29", { after: "2024-02-29" }, { before: "2024-02-29T23:00:00Z" }, "2026-12-31"]) {
+    const { compiled, problems } = await compileFilters(findClient(), idx, { Date: value } as any, { remainingMs: 60000 });
+    assert.deepEqual(problems, [], JSON.stringify(value));
+    assert.equal(compiled.length, 1);
+  }
 });
 
 // === cap-dnf: briefError shares the client's first-line logic ===============
