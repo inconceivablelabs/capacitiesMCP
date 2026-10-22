@@ -628,7 +628,13 @@ test("enumerateObjects: GET /objects/<kind> with id + pageSize=100, cursor only 
   assert.equal(u.searchParams.get("cursor"), nasty);
   assert.deepEqual(u.searchParams.getAll("pageSize"), ["100"]);
 
-  assert.equal(client.rateLimiter.windows.get("enumerate").requests, 3);
+  const nastyId = "x&cursor=zz#h";
+  await client.enumerateObjects("tag", nastyId);
+  u = new URL(calls[3].url);
+  assert.equal(u.searchParams.get("id"), nastyId);
+  assert.equal(u.searchParams.has("cursor"), false, "an unencoded id would smuggle a cursor param");
+
+  assert.equal(client.rateLimiter.windows.get("enumerate").requests, 4);
   assert.equal(client.rateLimiter.windows.get("search"), undefined, "enumeration must not spend the search bucket");
   assert.equal(client.rateLimiter.windows.get("object"), undefined, "nor the object bucket");
 });
