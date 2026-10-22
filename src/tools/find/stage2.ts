@@ -34,10 +34,11 @@ export async function fetchCandidates(
   let erroredCount = 0;
   // Circuit breaker (cap-fvb): a Cloudflare ban can arrive as a 403, and every
   // further GET extends an IP-level ban shared by every client on our egress.
-  // Stop at once on a 403 (or a 401), or after a run of SERVICE failures (5xx, or no HTTP
-  // status at all — a network error) that only a success resets. Any other 4xx
-  // (a deleted candidate's 404) says nothing about the service, so it neither
-  // advances nor resets the run (cap-fvb review M3).
+  // Stop at once on a 403 (or a 401), or after a run of read failures that only
+  // a success resets. A 404 is the per-object case (a deleted candidate), so it
+  // neither advances nor resets the run (M3); anything else — another 4xx, a
+  // 5xx, a network error — advances it, since a 400 or 410 on every GET is
+  // systemic, e.g. an API sunset (cap-fvb delta D4).
   let consecutiveErrors = 0;
   let breakerStop: string | null = null;
   for (let i = 0; i < planned; i++) {
@@ -50,7 +51,7 @@ export async function fetchCandidates(
       if (e instanceof CapacitiesAPIError && e.code === "RATE_LIMIT_EXCEEDED") { rateStopped = true; break; }
       erroredCount++;
       const status = e instanceof CapacitiesAPIError ? e.details?.status : undefined;
-      if (typeof status !== "number" || status >= 500) consecutiveErrors++;
+      if (status !== 404) consecutiveErrors++;
       const detail = briefError(e instanceof Error ? e.message : String(e));
       // A 401 mid-loop (token revoked) fails every remaining GET the same way.
       if (status === 403 || status === 401) {
@@ -58,7 +59,7 @@ export async function fetchCandidates(
         break;
       }
       if (consecutiveErrors >= MAX_CONSECUTIVE_READ_ERRORS) {
-        breakerStop = `${consecutiveErrors} server or network errors with no successful read between them (${detail})`;
+        breakerStop = `${consecutiveErrors} read errors with no successful read between them, not counting not-found (${detail})`;
         break;
       }
     }

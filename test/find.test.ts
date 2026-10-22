@@ -2000,7 +2000,7 @@ test("find_objects: three consecutive non-rate failures stop the loop — exactl
   assert.equal(res.isError, undefined);
   assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
   const text = res.content[0].text as string;
-  assert.match(text, /^Note: stopped reading candidates after 3 server or network errors with no successful read between them \(API error 500: boom\); results may be incomplete\.$/m);
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 500: boom\); results may be incomplete\.$/m);
   assert.doesNotMatch(text, PA_COUNTS_RE);
   assert.doesNotMatch(text, /fetched the first/, "the loop stopped; the fetch_cap Note would misstate what was read");
   const ex = exactnessOf(res);
@@ -2214,12 +2214,11 @@ test("find_objects: a pretty-printed JSON error body reaches a Note compacted, n
   const handler = getFind();
   const body = JSON.stringify({ code: "bad_request", message: "nope", details: [{ path: "id" }] }, null, 2);
   assert.ok(body.includes("\n"), "fixture is multi-line");
-  // 500, not 400: only service errors advance the breaker (cap-fvb review M3).
-  const fail = { status: 500, text: body };
+  const fail = { status: 400, text: body };
   installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: fail, m2: fail, m3: fail } }));
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
   const text = res.content[0].text as string;
-  assert.match(text, /^Note: stopped reading candidates after 3 server or network errors with no successful read between them \(API error 500: \{"code":"bad_request","message":"nope","details":\[\{"path":"id"\}\]\}\); results may be incomplete\.$/m);
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 400: \{"code":"bad_request","message":"nope","details":\[\{"path":"id"\}\]\}\); results may be incomplete\.$/m);
 });
 
 // === cap-dnf review I1: a 403 ban page stops stage 2 through the rate path ==
@@ -2241,7 +2240,7 @@ test("find_objects: a 403 Cloudflare ban on the first GET stops stage 2 via the 
 // A 404 (deleted candidate) or other 4xx says nothing about the service, so it
 // is counted as errored but neither advances nor resets the run.
 
-test("find_objects: 404, 404, 404 then successes reads every candidate — client errors never trip the breaker (M3)", async () => {
+test("find_objects: 404, 404, 404 then successes reads every candidate — a not-found never trips the breaker (M3)", async () => {
   const handler = getFind();
   const gone = { status: 404, text: "not found" };
   const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: gone, m2: gone, m3: gone } }));
@@ -2262,7 +2261,7 @@ test("find_objects: 500, 404, 500, 500 stops after the 4th GET — a 404 neither
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
   assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3", "m4"]);
   const text = res.content[0].text as string;
-  assert.match(text, /^Note: stopped reading candidates after 3 server or network errors/m);
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them/m);
   assert.equal(exactnessOf(res).errored, 4);
   assert.equal(exactnessOf(res).considered, 4);
 });
@@ -2277,5 +2276,28 @@ test("find_objects: network errors with no HTTP status advance the breaker — e
   const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
   assert.equal(res.isError, undefined);
   assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
-  assert.match(res.content[0].text, /^Note: stopped reading candidates after 3 server or network errors .*\(fetch failed\)/m);
+  assert.match(res.content[0].text, /^Note: stopped reading candidates after 3 read errors .*\(fetch failed\)/m);
+});
+
+// === cap-fvb delta D4: only a 404 is exempt from the breaker run ============
+// A 404 is the per-object case (a deleted candidate). A 400 or 410 on every GET
+// is systemic (e.g. an API sunset), so it advances the run like a 5xx.
+
+test("find_objects: 400, 400, 400 stops after 3 GETs — only a 404 is exempt (D4)", async () => {
+  const handler = getFind();
+  const bad = { status: 400, text: "bad request" };
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: bad, m2: bad, m3: bad } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after 3 read errors with no successful read between them, not counting not-found \(API error 400: bad request\); results may be incomplete\.$/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+});
+
+test("find_objects: 410, 410, 410 stops after 3 GETs (D4)", async () => {
+  const handler = getFind();
+  const gone = { status: 410, text: "API version sunset" };
+  const calls = installFind(findRouter({ search: { Note: fiveNotes() }, getFail: { m1: gone, m2: gone, m3: gone } }));
+  await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2", "m3"]);
 });
