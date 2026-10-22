@@ -189,7 +189,7 @@ test("compileSort: resolves by name, defaults propagate; unknown property → pr
 
 // === find_objects tool (mocked fetch, node --test) =========================
 
-import { setupFindTools, PAGE_BUDGET_MAX } from "../src/tools/find.js";
+import { setupFindTools, PAGE_BUDGET_MAX, MAX_REQUESTS_PER_CALL } from "../src/tools/find.js";
 
 interface FCall { url: string; opts: any; }
 function fRouteResp(init: { ok?: boolean; status?: number; body?: unknown; text?: string; contentType?: string | null; contentLength?: string | null }) {
@@ -1349,4 +1349,97 @@ test("find_objects: unreadable candidates are never counted as read — the samp
   text = (await handler({ structure: "Meeting", title_hint: "Note", filters: { Status: "Done" } })).content[0].text;
   assert.match(text, /^\(none of the 3 candidates read matched the filters — 2 could not be read\)$/m);
   assert.doesNotMatch(text, /checked \d+ of \d+ candidates/);
+});
+
+// --- Per-call request budget + relation-filter cap (cap-i93 Task 8) ----------
+
+test("find_objects: the per-call request budget clamps page_budget and fetch_cap with Notes, never rejects", async () => {
+  const big = summaries(1, 2000, n => `Sync ${n}`);   // 20 pages
+  const TAG_HIT = [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }];
+  const cases: { name: string; args: any; base: any; pages: number }[] = [
+    // 45 - 1 (space) - 30 (fetch reserve) = 14
+    { name: "structure + sort", args: { sort: SORT_DATE_DESC }, base: {}, pages: 14 },
+    // 45 - 1 - 1 (seed search) - 30 = 13
+    { name: "escalated title + sort", args: { title_hint: "Sync", sort: SORT_DATE_DESC }, base: { search: { Sync: big.slice(0, 50) } }, pages: 13 },
+    // 45 - 1 - 1 (entity-filter resolution) - 30 = 13
+    { name: "structure + entity filter", args: { sort: SORT_DATE_DESC, filters: { Tags: "product" } }, base: { search: { product: TAG_HIT } }, pages: 13 }
+  ];
+  for (const c of cases) {
+    const handler = getFind();
+    const calls = installFind(enumRouter({ base: c.base, structurePages: { meeting: pagesOf(big) } }));
+    const res = await handler({ structure: "Meeting", page_budget: 25, fetch_cap: 50, ...c.args });
+    assert.equal(res.isError, undefined, c.name);
+    assert.equal(enumCalls(calls).length, c.pages, `${c.name}: pages read`);
+    const text = res.content[0].text;
+    assert.match(text, new RegExp(`^Note: listing stopped at the page budget \\(${c.pages} pages, clamped from 25 by the per-call request budget of 45\\)`, "m"), c.name);
+    assert.match(text, /^Note: fetched the first 30 of \d+ candidates \(per-call request budget of 45\)/m, c.name);
+    assert.ok(calls.length <= MAX_REQUESTS_PER_CALL, `${c.name}: ${calls.length} requests`);
+  }
+});
+
+test("find_objects: without stage 2 nothing is reserved for fetches, and defaults never clamp", async () => {
+  const big = summaries(1, 2000, n => `Sync ${n}`);
+  let handler = getFind();
+  let calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(big) } }));
+  let res = await handler({ structure: "Meeting", page_budget: 25 });          // short-circuit
+  assert.equal(enumCalls(calls).length, 20, "page_budget 25 honoured in full");
+  assert.equal(res.structuredContent.seed_complete, true);
+  assert.doesNotMatch(res.content[0].text, /clamped/);
+
+  handler = getFind();
+  calls = installFind(enumRouter({ base: { search: { Sync: big.slice(0, 50) } }, structurePages: { meeting: pagesOf(big) } }));
+  res = await handler({ structure: "Meeting", title_hint: "Sync", sort: SORT_DATE_DESC }); // defaults: 12 pages, fetch_cap 30
+  assert.equal(enumCalls(calls).length, 12);
+  assert.match(res.content[0].text, /^Note: listing stopped at the page budget — read 12 pages/m);
+  assert.doesNotMatch(res.content[0].text, /clamped|per-call request budget/);
+});
+
+test("find_objects: a plain title search that does NOT escalate keeps today's behaviour — fetch_cap 50 honoured, the limiter waits, no budget Note (D5)", async () => {
+  const clock = fakeClock();
+  const handler = getFind(clock);
+  const calls = installFind(enumRouter({ base: { search: { Retro: summaries(1, 49, n => `Retro ${n}`) } } }));
+  const res = await handler({ structure: "Meeting", title_hint: "Retro", fetch_cap: 50, sort: SORT_DATE_DESC });
+  assert.equal(res.isError, undefined);
+  assert.equal(enumCalls(calls).length, 0, "49 does not escalate");
+  assert.equal(fetchedIds(calls).length, 49, "fetch_cap 50 honoured: every candidate fetched");
+  assert.deepEqual(clock.sleeps, [60000], "the object bucket's own wait paces the 31st GET");
+  assert.doesNotMatch(res.content[0].text, /per-call request budget/);
+  assert.equal(res.structuredContent.candidates_complete, true);
+});
+
+// Meeting plus six more relation properties, so a call can carry six relation filters.
+function relationStructures(): any {
+  const s = meetingStructure();
+  for (let i = 1; i <= 6; i++) s.propertyDefinitions.push({ id: `rel${i}`, name: `Rel${i}`, type: "entity", writable: true, allowedStructures: ["RootTag"] });
+  return { structures: [s, ...findStructures().structures.slice(1)] };
+}
+const PRODUCT_TAG_HIT = [{ id: TAG_PRODUCT, title: "product", structureId: "RootTag" }];
+
+test("find_objects: a 6th relation filter is rejected before any search, naming the limit (D2)", async () => {
+  const handler = getFind();
+  const calls = installFind(enumRouter({ base: { structures: relationStructures(), search: { product: PRODUCT_TAG_HIT } } }));
+  const filters = { Rel1: "product", Rel2: "product", Rel3: "product", Rel4: "product", Rel5: "product", Rel6: "product" };
+  const res = await handler({ structure: "Meeting", filters, sort: SORT_DATE_DESC });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /6 relation filters given/);
+  assert.match(res.content[0].text, /maximum is 5 per call/);
+  assert.deepEqual(calls.map(c => new URL(c.url).pathname), ["/space/structures"],
+    "only the structure read that types the filters — no search, no listing, no GET");
+});
+
+test("find_objects: five relation filters plus a label and a date filter are accepted, and the worst case is exactly 45 requests (D2)", async () => {
+  const handler = getFind();
+  const filters = { Rel1: "product", Rel2: "product", Rel3: "product", Rel4: "product", Rel5: "product",
+                    Status: "Done", Date: { after: "2020-01-01" } };
+  const calls = installFind(enumRouter({
+    base: { structures: relationStructures(), search: { product: PRODUCT_TAG_HIT } },
+    tagPages: { [TAG_PRODUCT]: pagesOf(summaries(1, 2000, n => `Sync ${n}`)) }
+  }));
+  const res = await handler({ structure: "Meeting", tag: "product", filters, sort: SORT_DATE_DESC, page_budget: 25, fetch_cap: 50 });
+  assert.equal(res.isError, undefined, res.content[0].text);
+  // 1 structure read + 5 relation searches + 1 tag search = 7; 45 - 7 - 30 (fetch reserve) = 8 pages; then 30 GETs.
+  assert.equal(searchQueries(calls).length, 6);
+  assert.equal(enumCalls(calls).length, 8);
+  assert.equal(fetchedIds(calls).length, 30);
+  assert.equal(calls.length, MAX_REQUESTS_PER_CALL);
 });

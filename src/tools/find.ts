@@ -35,7 +35,16 @@ import { parseTitleDate, orderEnumerated } from "../utils/title-date.js";
 export const PAGE_BUDGET_DEFAULT = 12;
 export const PAGE_BUDGET_MAX = 25;
 export const TITLE_HINT_MAX = 512;           // spec: /objects/search query maxLength
-export const MAX_REQUESTS_PER_CALL = 45;    // used from Task 8
+// Every request an ENUMERATING call makes (space read, relation searches, seed
+// search, listing pages, GETs) fits this per-call budget; a plain title search
+// that does not escalate is exempt and keeps the limiter's own pacing (D5).
+export const MAX_REQUESTS_PER_CALL = 45;
+// Each relation filter costs one name-resolution search, so capping them is what
+// makes MAX_REQUESTS_PER_CALL a true ceiling (D2).
+export const MAX_ENTITY_FILTERS = 5;
+// Fetches reserved out of the budget before listing, so a long listing cannot
+// starve stage 2: one object-bucket window.
+const FETCH_RESERVE_MAX = 30;
 
 export type SeedMethod = "search" | "search+enumeration" | "tag-enumeration" | "structure-enumeration";
 // Returned as structuredContent on every non-error result, so a caller can tell a
@@ -65,10 +74,16 @@ function briefError(message: string | undefined): string {
 
 // Stage-1 Note for an incomplete listing. Never uses stage 2's "checked N of M
 // candidates" phrase: personal-assistant's backfill keys on it (U6).
-function enumerationNote(e: EnumerationResult): string | null {
+// `requestedPages` is the caller's page_budget; when the request budget clamped it
+// below that, raising page_budget would not help, so the Note says so instead.
+function enumerationNote(e: EnumerationResult, requestedPages: number, effectivePages: number): string | null {
   if (e.complete) return null;
   switch (e.stopReason) {
     case "page-budget":
+      if (effectivePages < requestedPages) {
+        return `Note: listing stopped at the page budget (${e.pagesRead} pages, clamped from ${requestedPages} by the per-call request budget of ${MAX_REQUESTS_PER_CALL}) — ` +
+          `read ${e.results.length} summaries and more remain; results may be incomplete. Narrow the seed (title_hint or tag).`;
+      }
       return `Note: listing stopped at the page budget — read ${e.pagesRead} pages (${e.results.length} summaries) and more remain; ` +
         `results may be incomplete. Narrow the seed (title_hint or tag) or raise page_budget (max ${PAGE_BUDGET_MAX}).`;
     case "rate-limit":
@@ -516,6 +531,19 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const struct = sres.structure;
         const index = buildPropertyIndex(struct);
 
+        // D2: cap relation filters BEFORE compileFilters resolves them, so a rejected
+        // call spends nothing past the structure read. Keys that do not resolve are
+        // not counted; compileFilters reports them below.
+        const entityKeys = Object.keys(filters ?? {}).filter(key => {
+          const r = resolvePropertyKey(index, key);
+          return !("problem" in r) && r.def.type === "entity";
+        });
+        if (entityKeys.length > MAX_ENTITY_FILTERS) {
+          return { content: [{ type: "text", text:
+            `Cannot run find_objects:\n- filters: ${entityKeys.length} relation filters given (${entityKeys.join(", ")}); ` +
+            `the maximum is ${MAX_ENTITY_FILTERS} per call, because each one costs a name-resolution search.` }], isError: true };
+        }
+
         // Operation-level bounded-wait budget: buys exactly ONE object-window
         // boundary sleep across the whole call (entity-filter searches + seed
         // search + the fetch loop). Past it, acquireWithWait throws
@@ -542,6 +570,18 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const infoLines: string[] = [];
         const stage1Notes: string[] = [];
 
+        // Per-call request budget (D5: only a call that lists). Requests already
+        // spent: the structure read plus one search per relation filter; the seed
+        // or tag search is added on the path that makes it.
+        const cap = fetch_cap ?? 30;
+        const shortCircuit = compiled.length === 0 && !compiledSort;
+        const fetchReserve = shortCircuit ? 0 : Math.min(cap, FETCH_RESERVE_MAX);
+        let spentBeforeEnumeration = 1 + compiled.filter(c => c.kind === "entity-equals").length;
+        const budgetedPages = (): number =>
+          Math.max(1, Math.min(pageBudget, MAX_REQUESTS_PER_CALL - spentBeforeEnumeration - fetchReserve));
+        let enumeration: EnumerationResult | null = null;
+        let effectivePages = pageBudget;
+
         if (tag === undefined && title_hint !== undefined) {
           const seed = await client.searchContent(
             { query: title_hint, structureIds: [struct.id], limit: SEARCH_LIMIT },
@@ -564,12 +604,15 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             const droppedCount = seed.length - titleSeed.length;
             if (droppedCount > 0) infoLines.push(`(${droppedCount} search result(s) were ignored because their titles don't contain "${title_hint}" — Capacities search also returns matches by meaning.)`);
           } else {
-            const listing = await enumerateAll(client, "structure", struct.id, pageBudget);
+            spentBeforeEnumeration += 1;   // the saturated seed search
+            effectivePages = budgetedPages();
+            const listing = await enumerateAll(client, "structure", struct.id, effectivePages);
+            enumeration = listing;
             candidates = listing.results.filter(r => r.structureId === struct.id && matchesTitle(r.title, title_hint));
             seedMethod = "search+enumeration";
             seedComplete = listing.complete;
             infoLines.push(`(The title search returned its ${SEARCH_LIMIT}-result maximum, so the ${plural} were listed instead: ${listing.pagesRead} page(s), ${listing.results.length} summaries.)`);
-            const note = enumerationNote(listing);
+            const note = enumerationNote(listing, pageBudget, effectivePages);
             if (note) stage1Notes.push(note);
             if (listing.complete) logFidelityCanary(struct.id, titleSeed, candidates);
           }
@@ -581,7 +624,9 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             if ("problem" in tres) {
               return { content: [{ type: "text", text: tres.problem }], isError: true };
             }
-            listing = await enumerateAll(client, "tag", tres.id, pageBudget);
+            spentBeforeEnumeration += 1;   // the tag-name search
+            effectivePages = budgetedPages();
+            listing = await enumerateAll(client, "tag", tres.id, effectivePages);
             seedMethod = "tag-enumeration";
             const scope = title_hint !== undefined
               ? `tagged "${tag}" with a title matching "${title_hint}"`
@@ -589,7 +634,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             header = (n, stamp) => `Found ${n} ${plural} ${scope} (live as of ${stamp}):`;
             noneText = stamp => `No ${plural} found ${scope} (live as of ${stamp}).`;
           } else {
-            listing = await enumerateAll(client, "structure", struct.id, pageBudget);
+            effectivePages = budgetedPages();
+            listing = await enumerateAll(client, "structure", struct.id, effectivePages);
             seedMethod = "structure-enumeration";
             header = (n, stamp) => `Found ${n} ${plural} (live as of ${stamp}):`;
             noneText = stamp => `No ${plural} found (live as of ${stamp}).`;
@@ -600,8 +646,9 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           candidates = listing.results.filter(r =>
             r.structureId === struct.id && (title_hint === undefined || matchesTitle(r.title, title_hint))
           );
+          enumeration = listing;
           seedComplete = listing.complete;
-          const note = enumerationNote(listing);
+          const note = enumerationNote(listing, pageBudget, effectivePages);
           if (note) stage1Notes.push(note);
         }
         const stamp = new Date().toISOString();
@@ -636,7 +683,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
 
         // Short-circuit: nothing to filter or sort on means nothing to surface, so
         // list the seed itself with zero GET /object (design Example C).
-        if (compiled.length === 0 && !compiledSort) {
+        if (shortCircuit) {
           const rows = candidates.slice(0, limit ?? 30);
           const info = [...infoLines];
           const undated = undatedLine(rows.length);
@@ -667,10 +714,14 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         //    candidate, up to fetch_cap, in the order above. Fail-open: a rate
         //    stop ends the loop with partial results; a non-rate read error skips
         //    the candidate and continues.
-        // NOTE: zod's .default(30) is applied by the MCP SDK's input parse, NOT on a
-        // direct handler call (tests invoke the handler directly), so default here too.
-        const cap = fetch_cap ?? 30;
-        const planned = Math.min(seedSize, cap);
+        //    `cap` defaults above: zod's .default(30) is applied by the MCP SDK's
+        //    input parse, NOT on a direct handler call. A listing call gets what is
+        //    left of the request budget (requestsIssued counts failed pages too); a
+        //    plain title search keeps the whole cap and the limiter's wait (D5).
+        const fetchAllowance = enumeration
+          ? Math.max(0, Math.min(cap, MAX_REQUESTS_PER_CALL - spentBeforeEnumeration - enumeration.requestsIssued))
+          : cap;
+        const planned = Math.min(seedSize, fetchAllowance);
         const fetched: { id: string; title: string; props: Record<string, any> }[] = [];
         let rateStopped = false;
         let erroredCount = 0;
@@ -729,7 +780,9 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           const order = !enumerated ? "in search-rank order"
             : allUndated ? "in listing order"
             : dir === "asc" ? "oldest first by title date" : "most recent first by title date";
-          stage2Notes.push(`Note: fetched the first ${planned} of ${seedSize} candidates (fetch_cap) ${order}; raise fetch_cap or narrow the seed.`);
+          stage2Notes.push(fetchAllowance < cap
+            ? `Note: fetched the first ${planned} of ${seedSize} candidates (per-call request budget of ${MAX_REQUESTS_PER_CALL}) ${order}; narrow the seed.`
+            : `Note: fetched the first ${planned} of ${seedSize} candidates (fetch_cap) ${order}; raise fetch_cap or narrow the seed.`);
         }
         // Independent of the cap/rate Notes above, so an unreadable candidate is never hidden by them.
         if (erroredCount > 0) stage2Notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
