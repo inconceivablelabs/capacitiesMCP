@@ -33,7 +33,7 @@ migrated from the v1 Beta API (which sunsets **2026-09-01**). It exposes a small
 search, structure introspection, and object CRUD — and lets the LLM compose those into workflows.
 
 **v2 API essentials:**
-- Bearer `cap-api-…` token; every request sends the header `X-Capacities-Api-Version: 0.1.0`.
+- Bearer `cap-api-…` token; every request sends the header `X-Capacities-Api-Version: 1.0.0` (the spec version; bumped from 0.1.0 in cap-6au after reads + a 400 diffed identical).
 - **A token is scoped to a single space.** `GET /space` is singular; search takes no `spaceId`.
   Multi-space = multiple tokens. There is no `space_id` parameter on any tool.
 

@@ -85,7 +85,7 @@ test("makeRequest sends the X-Capacities-Api-Version header", async () => {
 
   assert.equal(calls.length, 1);
   const headers = calls[0].opts.headers;
-  assert.equal(headers["X-Capacities-Api-Version"], "0.1.0");
+  assert.equal(headers["X-Capacities-Api-Version"], "1.0.0");
   assert.equal(headers["Authorization"], "Bearer test-token");
   assert.equal(headers["Content-Type"], "application/json");
 });

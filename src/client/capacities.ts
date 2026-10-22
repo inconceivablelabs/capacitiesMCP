@@ -68,7 +68,10 @@ export class CapacitiesClient {
         'Authorization': `Bearer ${this.apiToken}`,
         'Content-Type': 'application/json',
         // v2 REST API requires an explicit API version header on every request.
-        'X-Capacities-Api-Version': '0.1.0',
+        // 1.0.0 = info.version of developers.capacities.io/openapi.json; a pin
+        // below the minimum supported version is rejected with a 400 (docs,
+        // "Versioning"). Reads and a 400 body diffed identical vs 0.1.0 (cap-6au).
+        'X-Capacities-Api-Version': '1.0.0',
         ...options.headers
       }
     });
