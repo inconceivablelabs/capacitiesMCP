@@ -60,13 +60,14 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   `matchesTitle` in `utils/normalize.ts`, which drops semantic hits — cap-1kc), **tag**, **tag +
   title**, or **structure only** (list the whole type). A title search whose RAW result count hits
   50 escalates to listing the structure. Listings read up to `page_budget` pages (default 12, max
-  25) and are ordered by title date (newest first, undated after dated) before the `fetch_cap` cut
-  (default 30, max 50). Stage 2 is per-candidate `GET /object` (JSON, paced), then client-side
+  25) and are ordered by title date (newest first; oldest first for an ascending date sort;
+  undated after dated either way) before the `fetch_cap` cut (default 30, max 50). Stage 2 is per-candidate `GET /object` (JSON, paced), then client-side
   filter/sort. **Short-circuit:** no filters and no sort returns ids+titles with zero GETs. **Per
   call:** a call that LISTS stays within 45 requests in total (a plain title search is exempt and
-  keeps `fetch_cap` up to 50); at most 5 relation filters (labels/dates do not count). Any page-read
-  failure ends a listing as a PARTIAL with the rows read so far; only a bad token fails the call.
-  Every result carries `structuredContent` (`seed_method`, `seed_complete`, `candidates_complete`,
+  keeps `fetch_cap` up to 50); at most 5 relation filters (labels/dates do not count). A failure on a
+  listing PAGE ends the listing as a PARTIAL with the rows read so far (only a 401 there fails the
+  call); the structure read, the seed search and name resolution still fail it as before. Every
+  non-error result carries `structuredContent` (`seed_method`, `seed_complete`, `candidates_complete`,
   `seed_size`, `considered`, `errored`, `matched`, `returned`); the full answer needs both flags true
   AND `matched === returned`. **Output contract:** a `Note:` line means incomplete, and the phrase
   `checked N of M candidates` is reserved for the stage-2 rate-budget Note (PA parses both).

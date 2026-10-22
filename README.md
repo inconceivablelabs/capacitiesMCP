@@ -77,7 +77,7 @@ dependencies and the compiled output, with no source or dev dependencies.
 | Tool | Description |
 |------|-------------|
 | `search_content` | Search objects by title (optionally scoped by `structureIds`, capped by `limit`). When Capacities has semantic search enabled, objects related by meaning are also returned, listed after the title matches under a "Related by meaning" label; `limit` caps the combined list |
-| `find_objects` | Locate objects of one type by a property the API can't search on — date, label/status, tag/relation, or scalar. Seed by title (`title_hint`; results limited to titles containing it), by `tag`, both, or neither, which lists the whole type (paged, `page_budget` up to 25 pages of 100). A title search that returns 50 results lists the whole type instead. Listed candidates are taken newest first by the date in their title (undated titles last). Filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). With no filters or sort it lists matches without reading each object. Dates are absolute ISO (equals or `{after,before}` range). A `Note:` line means the result may be incomplete |
+| `find_objects` | Locate objects of one type by a property the API can't search on — date, label/status, tag/relation, or scalar. Seed by title (`title_hint`; results limited to titles containing it), by `tag`, both, or neither, which lists the whole type (paged, `page_budget` up to 25 pages of 100). A title search that returns 50 results lists the whole type instead. Listed candidates are taken newest first by the date in their title (oldest first when sorting ascending on a date; undated titles last either way). Filters and sorts client-side over typed property values; returns ids + titles + the matched values (no bodies — compose with `get_object`). With no filters or sort it lists matches without reading each object. Dates are absolute ISO: a date-only value matches that day, a full timestamp that exact instant, or an `{after,before}` range. A `Note:` line means the result may be incomplete |
 | `list_spaces` | Show the space your API token is scoped to |
 | `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
@@ -143,8 +143,9 @@ Capacities enforces rate limits on its servers, per token and per endpoint (see 
 [rate-limiting docs](https://developers.capacities.io/api/overview/rate-limiting)). In our
 measurements against `/object` the window is **rolling**: slots free up one at a time as each request ages out of
 the trailing 60 seconds. This server also runs a client-side, per-endpoint limiter, and its
-multi-call tools (`find_objects`, and `create_object`/`update_object` with many relations) pace
-themselves against it. That limiter is best-effort: it cannot see other clients using the same
+multi-call tools (`create_object`/`update_object` with many relations, and `find_objects`' searches and
+object reads) pace themselves against it. A `find_objects` listing does not wait: when the window is full
+it stops as a partial, with a `Note:` line saying so. That limiter is best-effort: it cannot see other clients using the same
 token or network. **If a tool returns `RATE_LIMIT_EXCEEDED`, wait and retry** rather than trying
 to predict the window.
 

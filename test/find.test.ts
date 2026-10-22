@@ -589,6 +589,8 @@ test("find_objects: the REGISTERED description advertises tag and no-seed listin
   assert.match(d, /`returned`/);
   assert.match(d, /45 requests/);                                             // per-call limits stated up front
   assert.match(d, /5 relation filters/);
+  assert.match(d, /exact instant/);                                           // a full timestamp is not day-granularity
+  assert.doesNotMatch(d, /day-granularity/);
   assert.doesNotMatch(d, /CANNOT enumerate/i);
   assert.doesNotMatch(d, /REQUIRED: `title_hint`/);
   assert.match(config.inputSchema.title_hint.description, /optional/i);
@@ -1368,6 +1370,11 @@ test("find_objects: unreadable candidates are never counted as read — the samp
   installFind(findRouter({ search: { Note: five } }));
   text = (await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 4, sort: SORT_DATE_DESC })).content[0].text;
   assert.match(text, /^\(Sorted within the 4 candidates read only — the true first\/last by Date may lie among the 1 candidate not read\.\)$/m);
+  // Singular "was" on the not-fetched clause: fetch_cap 4 of 5, two unreadable.
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five }, getFail }));
+  text = (await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 4, filters: { Status: "Done" } })).content[0].text;
+  assert.match(text, /^\(none of the 2 candidates read matched the filters — 2 could not be read, 1 was not fetched\)$/m);
   // Zero clause omitted: everything requested, two unreadable, none left unfetched.
   handler = getFind();
   installFind(findRouter({ search: { Note: five }, getFail }));

@@ -66,15 +66,15 @@ const ERROR_DETAIL_MAX = 200;
 // An API error message carries the whole HTTP body (a Cloudflare page runs to
 // thousands of characters), and that body is server-controlled text landing in
 // tool output. Keep the first line, which holds the status, and cap it.
-// "1 candidate" / "2 candidates" for the sampling body and the extremum caveat.
-function candidatesPhrase(n: number): string {
-  return `${n} candidate${n === 1 ? "" : "s"}`;
-}
-
 function briefError(message: string | undefined): string {
   const first = (message ?? "").split("\n", 1)[0].trim();
   if (!first) return "unknown error";
   return first.length > ERROR_DETAIL_MAX ? first.slice(0, ERROR_DETAIL_MAX) + "…" : first;
+}
+
+// "1 candidate" / "2 candidates" for the sampling body and the extremum caveat.
+function candidatesPhrase(n: number): string {
+  return `${n} candidate${n === 1 ? "" : "s"}`;
 }
 
 // Stage-1 Note for an incomplete listing. Never uses stage 2's "checked N of M
@@ -481,7 +481,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         "`fetch_cap` (default 30, max 50) cuts them. With no filters and no sort, matches are listed without " +
         "fetching each object (up to `limit`, default 30). Per call: at most 5 relation filters, and a call " +
         "that lists makes at most 45 requests. `filters` are keyed by property NAME or id: a date is an " +
-        "absolute ISO string (equals, day-granularity) or {after,before} — not \"tomorrow\"; a label is an option NAME; a " +
+        "absolute ISO string (a date-only value matches that day, a full timestamp that exact instant) or " +
+        "{after,before}; a label is an option NAME; a " +
         "relation/tag is an object NAME; text/number/boolean are equals. `sort` is {by, order}; missing " +
         "values sort last. A line starting \"Note:\" means the result may be incomplete; `seed_complete` and " +
         "`candidates_complete` say which part, and it is the full answer only when both are true and " +
@@ -809,7 +810,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
             : readCount < seedSize
               ? `(none of the ${candidatesPhrase(readCount)} read matched the filters — ${[
                   erroredCount > 0 ? `${erroredCount} could not be read` : null,
-                  notFetched > 0 ? `${notFetched} were not fetched` : null
+                  notFetched > 0 ? `${notFetched} ${notFetched === 1 ? "was" : "were"} not fetched` : null
                 ].filter(Boolean).join(", ")})`
               : "(no candidates matched the filters)";
         const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
