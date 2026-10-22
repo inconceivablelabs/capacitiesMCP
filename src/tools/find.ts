@@ -64,10 +64,12 @@ export type FindExactness = {
   returned: number;     // rows in the response
 };
 
-// Compact JSON with no prefix: content[0] stays the human text consumers parse,
-// and JSON of these fields can never form a Note: line or a count phrase.
+// Compact JSON: content[0] stays the human text consumers parse, and JSON of
+// these fields can never form a Note: line or a count phrase. The leading
+// newline is because Claude Code joins text blocks with no separator — without
+// it the JSON lands on the end of the last text line, which may be a Note:.
 function exactnessBlock(exactness: FindExactness): { type: "text"; text: string } {
-  return { type: "text", text: JSON.stringify(exactness) };
+  return { type: "text", text: "\n" + JSON.stringify(exactness) };
 }
 
 const ERROR_DETAIL_MAX = 200;

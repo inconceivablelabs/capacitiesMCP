@@ -837,7 +837,9 @@ test("find_objects: no return path sends structuredContent; content[0] is the hu
     assert.equal(res.content[1].type, "text", name);
     const parsed = JSON.parse(res.content[1].text);
     assert.deepEqual(Object.keys(parsed).sort(), keys, `${name}: exactness keys`);
-    assert.equal(res.content[1].text, JSON.stringify(parsed), `${name}: compact, no prefix`);
+    // Claude Code joins blocks with no separator, so the JSON needs its own line.
+    assert.ok(res.content[1].text.startsWith("\n"), `${name}: content[1] starts with a newline`);
+    assert.equal(res.content[1].text, "\n" + JSON.stringify(parsed), `${name}: one newline, then compact JSON`);
   }
 });
 

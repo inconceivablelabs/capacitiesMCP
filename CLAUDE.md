@@ -67,7 +67,7 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   keeps `fetch_cap` up to 50); at most 5 relation filters (labels/dates do not count). A failure on a
   listing PAGE ends the listing as a PARTIAL with the rows read so far (only a 401 there fails the
   call); the structure read, the seed search and name resolution still fail it as before. Every
-  non-error result carries a SECOND text block, `content[1]`, of compact JSON (`seed_method`,
+  non-error result carries a SECOND text block, `content[1]`, of a newline then compact JSON (`seed_method`,
   `seed_complete`, `candidates_complete`, `seed_size`, `considered`, `errored`, `matched`,
   `returned`) — not `structuredContent`, because Claude Code shows the model the structuredContent
   INSTEAD of the text (cap-ul0); `content[0]` stays the human text. The full answer needs both flags true
