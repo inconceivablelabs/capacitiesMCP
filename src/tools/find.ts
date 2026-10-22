@@ -51,8 +51,9 @@ const FETCH_RESERVE_MAX = 30;
 export type SeedMethod = "search" | "search+enumeration" | "tag-enumeration" | "structure-enumeration";
 // Returned as a second text block of compact JSON (content[1]) on every non-error
 // result, so a caller can tell a genuine none from a partial one without parsing
-// Note: lines. NOT structuredContent: Claude Code shows the model only the
-// structuredContent JSON and drops content[0].text, which hid every id (cap-ul0).
+// Note: lines. NOT structuredContent: observed 2026-10-22 in Claude Code 2.1.305
+// via mcp-gateway, the model received only the structuredContent JSON and no
+// content[0].text, which hid every id; the layer responsible was not isolated (cap-ul0).
 export type FindExactness = {
   seed_method: SeedMethod;
   seed_complete: boolean;
@@ -66,8 +67,9 @@ export type FindExactness = {
 
 // Compact JSON: content[0] stays the human text consumers parse, and JSON of
 // these fields can never form a Note: line or a count phrase. The leading
-// newline is because Claude Code joins text blocks with no separator — without
-// it the JSON lands on the end of the last text line, which may be a Note:.
+// newline is because text blocks were seen joined with no separator (Claude Code
+// 2.1.305 via mcp-gateway, 2026-10-22) — without it the JSON lands on the end of
+// the last text line, which may be a Note:.
 function exactnessBlock(exactness: FindExactness): { type: "text"; text: string } {
   return { type: "text", text: "\n" + JSON.stringify(exactness) };
 }

@@ -244,8 +244,9 @@ function fakeClock() {
   return { now: () => t, sleep: async (ms: number) => { t += ms; sleeps.push(ms); }, sleeps };
 }
 // The FindExactness fields arrive as content[1], compact JSON. structuredContent
-// must stay absent: Claude Code shows the model ONLY structuredContent when it is
-// present, which hid every id and Note: line from LLM callers (cap-ul0).
+// must stay absent: observed 2026-10-22 in Claude Code 2.1.305 via mcp-gateway,
+// the model received only the structuredContent JSON and no content[0].text, which
+// hid every id and Note: line; the layer responsible was not isolated (cap-ul0).
 function exactnessOf(res: any): any {
   assert.equal(res.structuredContent, undefined, "find_objects must not return structuredContent (cap-ul0)");
   assert.equal(res.content.length, 2, "content[0] = human text, content[1] = exactness JSON");
@@ -799,8 +800,8 @@ test("find_objects: a resolved structure that enumerates to [] is a genuine none
 });
 
 test("find_objects: no return path sends structuredContent; content[0] is the human text, content[1] the exactness JSON (cap-ul0)", async () => {
-  // Claude Code 2.1.x shows the model ONLY structuredContent when present, so a
-  // result carrying it hid every id and Note: line. One row per return site.
+  // Observed in Claude Code 2.1.305 via mcp-gateway: with structuredContent present
+  // the model saw only that JSON, hiding every id and Note: line. One row per return site.
   const keys = ["candidates_complete", "considered", "errored", "matched", "returned", "seed_complete", "seed_method", "seed_size"];
   const rows: { name: string; res: any; text: RegExp }[] = [];
   let calls: FCall[];
@@ -837,7 +838,8 @@ test("find_objects: no return path sends structuredContent; content[0] is the hu
     assert.equal(res.content[1].type, "text", name);
     const parsed = JSON.parse(res.content[1].text);
     assert.deepEqual(Object.keys(parsed).sort(), keys, `${name}: exactness keys`);
-    // Claude Code joins blocks with no separator, so the JSON needs its own line.
+    // Blocks were seen joined with no separator (Claude Code 2.1.305 via mcp-gateway),
+    // so the JSON needs its own line.
     assert.ok(res.content[1].text.startsWith("\n"), `${name}: content[1] starts with a newline`);
     assert.equal(res.content[1].text, "\n" + JSON.stringify(parsed), `${name}: one newline, then compact JSON`);
   }
