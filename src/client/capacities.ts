@@ -11,7 +11,10 @@ export const WINDOW_MS = 60000;
 export const ENUMERATE_PAGE_SIZE = 100;
 
 // Wording of Cloudflare's 1015 rate-limit / temporary-ban page (cap-dnf review I1).
-const CLOUDFLARE_BAN = /error\s*(code)?\s*:?\s*1015|you are being rate limited|banned you temporarily/i;
+// Bounded quantifiers: the unbounded form backtracks O(n^3) on "error" + a long
+// whitespace run. Only the first BAN_SNIFF_MAX chars of a body are tested (D1).
+const CLOUDFLARE_BAN = /error(?:\s{0,3}code)?\s{0,3}:?\s{0,3}1015\b|you are being rate limited|banned you temporarily/i;
+const BAN_SNIFF_MAX = 8192;
 export type EnumerationKind = "structure" | "tag";
 
 // A mutable, operation-level bounded-wait budget. A single instance is shared
@@ -83,11 +86,14 @@ export class CapacitiesClient {
       // (JSON kept, anything else cut to one line); details.body stays raw (cap-dnf).
       const shown = errorBodyText(body);
 
-      // A Cloudflare ban page is a rate limit whatever its status (a hard ban can
-      // be 403). The shaped body no longer carries its wording, and consumers
-      // (personal-assistant) classify by "rate limit" in the message — so classify
-      // here. A JSON body is an app error, never a Cloudflare page. 401 stays auth.
-      const cloudflareBan = response.status !== 401 && !isJsonDocument(body) && CLOUDFLARE_BAN.test(body);
+      // A hard Cloudflare ban can arrive as a 403. The shaped body no longer
+      // carries its wording, and consumers (personal-assistant) classify by
+      // "rate limit" in the message — so classify here. ONLY a 403 is sniffed:
+      // every other status keeps its class, because PA keys "may have applied"
+      // on "API error 5…" and would retry a non-idempotent write it saw as a
+      // rate limit (D2). A JSON body is an app error, never a Cloudflare page.
+      const cloudflareBan = response.status === 403 && !isJsonDocument(body) &&
+        CLOUDFLARE_BAN.test(body.slice(0, BAN_SNIFF_MAX));
       if (response.status === 429 || cloudflareBan) {
         const retryAfter = response.headers.get("retry-after");
         throw new CapacitiesAPIError(

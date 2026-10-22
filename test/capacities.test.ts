@@ -799,3 +799,44 @@ test("makeRequest: a 401 carrying ban wording stays AUTHENTICATION_FAILED (I1)",
   const err = await rejectionOf(newClient().getSpaces());
   assert.equal(err.code, "AUTHENTICATION_FAILED");
 });
+
+// --- ban sniffing is 403-only and bounded (cap-dnf delta D1+D2) -------------
+// Any other status keeps its class: PA's daily-note path decides whether an
+// append may have landed by "api error 5" in the message, so a 5xx reclassified
+// as a rate limit would be retried after it applied.
+
+test("makeRequest: only a 403 is body-sniffed — 5xx and 400 with ban-like wording keep 'API error NNN' (D2)", async () => {
+  for (const [status, text] of [[503, "<p>\nYou are being rate limited</p>"], [502, "<html>\nerror code: 1015"], [400, "error 1015 is not a field"]] as const) {
+    installFetch(() => makeResponse({ ok: false, status, text }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.equal(err.code, "API_ERROR", `${status}`);
+    assert.ok(err.message.startsWith(`API error ${status}`), err.message);
+    assert.equal(err.details.status, status);
+  }
+});
+
+test("makeRequest: '1015' must end at a word boundary — a 403 '10150 rows' stays API_ERROR (D2)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<p>\nerror: 10150 rows over quota</p>" }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.code, "API_ERROR");
+});
+
+test("makeRequest: a 403 ban page still classifies, and sniffing a pathological body is fast (D1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: CF_BAN_HTML }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "RATE_LIMIT_EXCEEDED");
+
+  const evil = "error" + " ".repeat(100_000);
+  installFetch(() => makeResponse({ ok: false, status: 403, text: evil }));
+  const t0 = performance.now();
+  const err = await rejectionOf(newClient().getSpaces());
+  const ms = performance.now() - t0;
+  assert.equal(err.code, "API_ERROR");
+  assert.ok(ms < 200, `classified in ${ms.toFixed(0)} ms`);
+});
+
+test("makeRequest: ban wording past the first 8 KB of a 403 body is not sniffed (D1)", async () => {
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<html>\n" + "x".repeat(9000) + " banned you temporarily" }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "API_ERROR");
+  installFetch(() => makeResponse({ ok: false, status: 403, text: "<html>\n" + "x".repeat(7000) + " banned you temporarily" }));
+  assert.equal((await rejectionOf(newClient().getSpaces())).code, "RATE_LIMIT_EXCEEDED", "control: within 8 KB still classifies");
+});
