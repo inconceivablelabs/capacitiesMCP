@@ -46,7 +46,7 @@ export type FindExactness = {
   seed_complete: boolean;
   candidates_complete: boolean;
   seed_size: number;    // candidates after structure/title filtering
-  considered: number;   // stage 2: fetched + errored
+  considered: number;   // stage 2: fetched + errored; short-circuit: seed_size (nothing to read)
   errored: number;
   matched: number;      // matches after filtering, BEFORE the limit slice (D3)
   returned: number;     // rows in the response
@@ -624,8 +624,9 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const seedSize = candidates.length;
         // When no title carries a date the ordering above is a no-op, so a cut keeps
         // listing order — say so, rather than let it pass for "most recent" (S-M1).
+        const allUndated = enumerated && candidates.every(c => parseTitleDate(c.title) === null);
         const undatedLine = (kept: number): string | null =>
-          enumerated && kept < seedSize && candidates.every(c => parseTitleDate(c.title) === null)
+          allUndated && kept < seedSize
             ? `(None of the ${seedSize} candidate titles carries a date, so the ${kept} kept were taken in listing order, not by date.)`
             : null;
 
@@ -684,6 +685,10 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           }
         }
         const consideredCount = fetched.length + erroredCount;
+        // Only a READ candidate was filtered or sorted; an errored one was requested
+        // but never seen, so it is counted apart from those never requested.
+        const readCount = fetched.length;
+        const notFetched = seedSize - consideredCount;
 
         // 5. Filter client-side over the typed JSON values.
         let matches = fetched.filter(f => compiled.every(cf => matchesFilter(f.props, cf)));
@@ -710,8 +715,8 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         });
 
         const stage2Info: string[] = [];
-        if (compiledSort && consideredCount < seedSize) {
-          stage2Info.push(`(Sorted within the ${consideredCount} fetched candidates only — the true first/last by ${compiledSort.propName} may lie among the ${seedSize - consideredCount} candidates not fetched.)`);
+        if (compiledSort && readCount < seedSize) {
+          stage2Info.push(`(Sorted within the ${readCount} candidates read only — the true first/last by ${compiledSort.propName} may lie among the ${seedSize - readCount} candidates not read.)`);
         }
         // Trimming to the caller's limit is what they asked for, not incompleteness.
         if (limit !== undefined && matchedCount > limit) stage2Info.push(`(showing ${limit} of ${matchedCount} matches — limit)`);
@@ -721,10 +726,13 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         const stage2Notes: string[] = [];
         if (rateStopped) stage2Notes.push(`Note: rate budget reached — checked ${consideredCount} of ${seedSize} candidates; results may be incomplete (retry shortly or narrow the query).`);
         else if (planned < seedSize) {
-          const order = !enumerated ? "in search-rank order" : dir === "asc" ? "oldest first by title date" : "most recent first by title date";
+          const order = !enumerated ? "in search-rank order"
+            : allUndated ? "in listing order"
+            : dir === "asc" ? "oldest first by title date" : "most recent first by title date";
           stage2Notes.push(`Note: fetched the first ${planned} of ${seedSize} candidates (fetch_cap) ${order}; raise fetch_cap or narrow the seed.`);
         }
-        else if (erroredCount > 0) stage2Notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
+        // Independent of the cap/rate Notes above, so an unreadable candidate is never hidden by them.
+        if (erroredCount > 0) stage2Notes.push(`Note: ${erroredCount} candidate(s) could not be read and were skipped.`);
         const trailer = [...infoLines, ...stage2Info, ...stage1Notes, ...stage2Notes];
 
         // An empty candidate list here is a PARTIAL none (the listing stopped
@@ -734,8 +742,11 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
           ? blocks.join("\n---\n")
           : seedSize === 0
             ? `(no matching ${plural} in the part of the listing that was read)`
-            : consideredCount < seedSize
-              ? `(none of the ${consideredCount} fetched candidates matched the filters — ${seedSize - consideredCount} were not fetched)`
+            : readCount < seedSize
+              ? `(none of the ${readCount} candidates read matched the filters — ${[
+                  erroredCount > 0 ? `${erroredCount} could not be read` : null,
+                  notFetched > 0 ? `${notFetched} were not fetched` : null
+                ].filter(Boolean).join(", ")})`
               : "(no candidates matched the filters)";
         const noteLine = trailer.length ? "\n\n" + trailer.join("\n") : "";
         const exactness: FindExactness = {

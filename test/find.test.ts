@@ -1160,16 +1160,18 @@ const ORDER_FIXTURE: Summary[] = [
 ];
 
 test("find_objects: enumerated candidates are ordered by title date BEFORE fetch_cap truncates", async () => {
-  const cases: [string, any, string[]][] = [
-    ["sort Date desc → newest three", SORT_DATE_DESC, [uid(6), uid(3), uid(5)]],
-    ["sort Date asc → oldest three", { by: "Date", order: "asc" }, [uid(1), uid(5), uid(3)]],
-    ["sort by a LABEL asc → direction ignored, newest three", { by: "Status", order: "asc" }, [uid(6), uid(3), uid(5)]]
+  const cases: [string, any, string[], RegExp][] = [
+    ["sort Date desc → newest three", SORT_DATE_DESC, [uid(6), uid(3), uid(5)], /most recent first by title date/],
+    ["sort Date asc → oldest three", { by: "Date", order: "asc" }, [uid(1), uid(5), uid(3)], /oldest first by title date/],
+    ["sort by a LABEL asc → direction ignored, newest three", { by: "Status", order: "asc" }, [uid(6), uid(3), uid(5)], /most recent first by title date/]
   ];
-  for (const [name, sort, want] of cases) {
+  for (const [name, sort, want, phrase] of cases) {
     const handler = getFind();
     const calls = installFind(enumRouter({ structurePages: { meeting: pagesOf(ORDER_FIXTURE) } }));
-    await handler({ structure: "Meeting", sort, fetch_cap: 3 });
+    const res = await handler({ structure: "Meeting", sort, fetch_cap: 3 });
     assert.deepEqual(fetchedIds(calls), want, name);
+    // The fetch_cap Note names the order the cut was taken in (M2).
+    assert.match(res.content[0].text, phrase, name);
   }
 });
 
@@ -1228,7 +1230,7 @@ test("find_objects: when truncation left filters a SAMPLE, an empty result says 
   let handler = getFind();
   installFind(findRouter({ search: { Note: five } }));
   let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, filters: { Status: "Done" } });
-  assert.match(res.content[0].text, /^\(none of the 2 fetched candidates matched the filters — 3 were not fetched\)$/m);
+  assert.match(res.content[0].text, /^\(none of the 2 candidates read matched the filters — 3 were not fetched\)$/m);
   assert.doesNotMatch(res.content[0].text, /^\(no candidates matched the filters\)$/m);
   // Known-positive: everything fetched → the plain wording.
   handler = getFind();
@@ -1239,7 +1241,7 @@ test("find_objects: when truncation left filters a SAMPLE, an empty result says 
 
 test("find_objects: the extremum caveat appears iff a sorted result was truncated, and is never a Note", async () => {
   const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
-  const caveat = /^\(Sorted within the 2 fetched candidates only — the true first\/last by Date may lie among the 3 candidates not fetched\.\)$/m;
+  const caveat = /^\(Sorted within the 2 candidates read only — the true first\/last by Date may lie among the 3 candidates not read\.\)$/m;
   let handler = getFind();
   installFind(findRouter({ search: { Note: five } }));
   let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 2, sort: SORT_DATE_DESC });
@@ -1279,6 +1281,8 @@ test("find_objects: when titles carry no dates and rows were cut, an info line s
   installFind(enumRouter({ structurePages: { meeting: pagesOf(undated) } }));
   text = (await handler({ structure: "Meeting", sort: SORT_DATE_DESC, fetch_cap: 5 })).content[0].text;
   assert.equal(text.match(line)?.[1], "5");
+  // With no title dates the cut follows the listing, and the Note must not claim a date order (M1).
+  assert.match(text, /^Note: fetched the first 5 of 40 candidates \(fetch_cap\) in listing order; /m);
   // Known-negatives: nothing cut → no line; dated titles cut → no line.
   handler = getFind();
   installFind(enumRouter({ structurePages: { meeting: pagesOf(undated) } }));
@@ -1320,4 +1324,29 @@ test("find_objects: the undated listing-order line never appears on the plain ti
   res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC, fetch_cap: 2 });
   assert.match(res.content[0].text, /^Note: fetched the first 2 of 5 candidates \(fetch_cap\) in search-rank order/m);
   assert.doesNotMatch(res.content[0].text, /carries a date/);
+});
+
+test("find_objects: unreadable candidates are never counted as read — the sampling body and caveat count reads, and the could-not-be-read Note survives a fetch_cap cut (I1)", async () => {
+  const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  const getFail = { m1: { status: 500, text: "boom" }, m2: { status: 500, text: "boom" } };
+  // 5 candidates, fetch_cap 3: m1/m2 error, m3 is read and does not match, m4/m5 are never requested.
+  let handler = getFind();
+  installFind(findRouter({ search: { Note: five }, getFail }));
+  let res = await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 3, filters: { Status: "Done" } });
+  let text = res.content[0].text;
+  assert.match(text, /^\(none of the 1 candidates read matched the filters — 2 could not be read, 2 were not fetched\)$/m);
+  assert.match(text, /^Note: 2 candidate\(s\) could not be read and were skipped\.$/m);
+  assert.match(text, /^Note: fetched the first 3 of 5 candidates \(fetch_cap\)/m);
+  assert.equal(res.structuredContent.errored, 2);
+  // Caveat on the same fixture, sorted: the order holds over the ONE candidate read.
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five }, getFail }));
+  text = (await handler({ structure: "Meeting", title_hint: "Note", fetch_cap: 3, sort: SORT_DATE_DESC })).content[0].text;
+  assert.match(text, /^\(Sorted within the 1 candidates read only — the true first\/last by Date may lie among the 4 candidates not read\.\)$/m);
+  // Zero clause omitted: everything requested, two unreadable, none left unfetched.
+  handler = getFind();
+  installFind(findRouter({ search: { Note: five }, getFail }));
+  text = (await handler({ structure: "Meeting", title_hint: "Note", filters: { Status: "Done" } })).content[0].text;
+  assert.match(text, /^\(none of the 3 candidates read matched the filters — 2 could not be read\)$/m);
+  assert.doesNotMatch(text, /checked \d+ of \d+ candidates/);
 });
