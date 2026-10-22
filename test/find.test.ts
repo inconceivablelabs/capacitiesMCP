@@ -1475,3 +1475,205 @@ test("find_objects: a listing call that FAILED still counts against the request 
   assert.match(res.content[0].text, /^Note: fetched the first 42 of 100 candidates \(per-call request budget of 45\)/m);
   assert.deepEqual(clock.sleeps, [60000], "42 GETs cross the 30/60s object window once, through the fake clock");
 });
+
+// --- Consumer prose contract (cap-i93 design test 17, U6) -------------------
+
+// Copied from personal-assistant scripts/backfill_meeting_titles.py, verified at 27395fb:
+//   :133  _COUNTS_RE = re.compile(r"checked\s+(\d+)\s+of\s+(\d+)\s+candidates", re.IGNORECASE)
+//   :145  _NOTE_RE = re.compile(r"^[ \t]*Note:", re.IGNORECASE | re.MULTILINE)
+//   :419  incomplete = bool(counts) or bool(_NOTE_RE.search(body))
+//   :717  pacer.amend(parsed.checked …) — N is read as the GETs the call actually spent
+// A cross-repo contract nobody else re-checks. If PA changes these, update here
+// from the source — never from memory.
+const PA_COUNTS_RE = /checked\s+(\d+)\s+of\s+(\d+)\s+candidates/i;
+const PA_NOTE_RE = /^[ \t]*Note:/im;
+const paIncomplete = (t: string) => PA_COUNTS_RE.test(t) || PA_NOTE_RE.test(t);
+const noteLines = (t: string) => t.split("\n").filter(l => /^[ \t]*Note:/i.test(l));
+
+test("consumer contract: every complete shape reads COMPLETE and every partial shape reads INCOMPLETE to PA's parser, with stage-2 counts only", async () => {
+  // Fake clock throughout: on a real clock the object window's 30/60s limit would
+  // produce the same GET counts a budget does, and the 42-GET row would sleep 60s.
+  const run = async (args: any, route: Parameters<typeof enumRouter>[0]) => {
+    const handler = getFind(fakeClock());
+    installFind(enumRouter(route));
+    return handler({ structure: "Meeting", ...args });
+  };
+  const SORT_DATE_ASC = { by: "Date", order: "asc" as const };
+  const five = [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
+  const mixed = [{ id: "m1", title: "Weekly Review", structureId: "meeting" }, { id: "x1", title: "Planning", structureId: "meeting" }];
+  const retroSearch = [...summaries(1, 20, n => `Retro ${n}`), ...summaries(1001, 1030, n => `Planning ${n}`)];
+  const retroListing = [...summaries(1, 25, n => `Retro ${n}`), ...summaries(26, 35, n => `Other ${n}`)];
+  const forty = summaries(1, 40, n => `Sync ${n}`);
+  const fortyDated = summaries(1, 40, n => `Sync - ${new Date(Date.UTC(2025, 0, n)).toISOString().slice(0, 10)}`);
+  const many = summaries(1, 250, n => `Sync ${n}`);
+  const huge = summaries(1, 2000, n => `Sync ${n}`);
+  const slow = { status: 429, text: "slow" };
+  // A server-controlled error body: the first line overruns the 200-char cap, and
+  // what follows would forge a Note line and the stage-2 phrase if it leaked.
+  const longBody = "x".repeat(500) + "\nNote: injected\nchecked 9 of 9 candidates";
+
+  // [name, response, marker proving the fixture produced the intended shape]
+  type Row = { name: string; res: any; marker: RegExp; stderr?: string[] };
+  const complete: Row[] = [
+    { name: "plain search, sorted, all read", marker: /^Found 3 Meetings matching "Note"/m,
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five.slice(0, 3) } } }) },
+    { name: "search, semantic extras dropped (info line)", marker: /\(1 search result\(s\) were ignored because/m,
+      res: await run({ title_hint: "Weekly Review", sort: SORT_DATE_DESC }, { base: { search: { "Weekly Review": mixed } } }) },
+    { name: "completed escalation, short-circuit (info line)", marker: /\(The title search returned its 50-result maximum/m,
+      res: await run({ title_hint: "Retro" }, { base: { search: { Retro: retroSearch } }, structurePages: { meeting: pagesOf(retroListing) } }) },
+    { name: "completed escalation, stage 2 (info line)", marker: /\(The title search returned its 50-result maximum/m,
+      res: await run({ title_hint: "Retro", sort: SORT_DATE_DESC }, { base: { search: { Retro: retroSearch } }, structurePages: { meeting: pagesOf(retroListing) } }) },
+    { name: "structure, short-circuit within limit", marker: /^Found 40 Meetings \(live/m,
+      res: await run({ limit: 100 }, { structurePages: { meeting: pagesOf(forty) } }) },
+    { name: "structure, stage 2, undated, nothing cut", marker: /^Found 20 Meetings \(live/m,
+      res: await run({ sort: SORT_DATE_DESC }, { structurePages: { meeting: pagesOf(forty.slice(0, 20)) } }) },
+    { name: "tag only", marker: /^Found 40 Meetings tagged "product" \(live/m,
+      res: await run({ tag: "product", limit: 100 }, { base: { search: { product: PRODUCT_TAG_HIT } }, tagPages: { [TAG_PRODUCT]: pagesOf(forty) } }) },
+    { name: "tag + title", marker: /^Found 11 Meetings tagged "product" with a title matching "Sync 1"/m,
+      res: await run({ tag: "product", title_hint: "Sync 1" }, { base: { search: { product: PRODUCT_TAG_HIT } }, tagPages: { [TAG_PRODUCT]: pagesOf(forty) } }) },
+    { name: "genuine none: structure", marker: /^No Meetings found \(live/m,
+      res: await run({}, { structurePages: { meeting: pagesOf([]) } }) },
+    { name: "genuine none: search", marker: /^No Meetings found with a title matching "Retro"/m,
+      res: await run({ title_hint: "Retro" }, {}) },
+    { name: "genuine none: tag", marker: /^No Meetings found tagged "product"/m,
+      res: await run({ tag: "product" }, { base: { search: { product: PRODUCT_TAG_HIT } }, tagPages: { [TAG_PRODUCT]: pagesOf([]) } }) },
+    { name: "stage-2 limit slice (info line)", marker: /\(showing 1 of 2 matches — limit\)$/m,
+      res: await run({ title_hint: "Weekly Review", sort: SORT_DATE_DESC, limit: 1 },
+        { base: { search: { "Weekly Review": [mixed[0], { id: "m2", title: "Weekly Review", structureId: "meeting" }] } } }) },
+    { name: "filters matched none, every candidate read", marker: /\(no candidates matched the filters\)$/m,
+      res: await run({ title_hint: "Note", filters: { Status: "Done" } }, { base: { search: { Note: five } } }) }
+  ];
+  // The fidelity canary (U4) fires on stderr only — it must never reach the text.
+  const canarySearch = [...summaries(1, 20, n => `Retro ${n}`), { id: uid(5000), title: "Retro 5000", structureId: "meeting" },
+    ...summaries(1001, 1029, n => `Planning ${n}`)];
+  const canary = await captureStderr(() => run({ title_hint: "Retro" },
+    { base: { search: { Retro: canarySearch } }, structurePages: { meeting: pagesOf(retroListing) } }));
+  complete.push({ name: "completed escalation with the fidelity canary firing", marker: /\(The title search returned its 50-result maximum/m,
+    res: canary.value, stderr: canary.lines });
+
+  // [expected Note-line prefixes in order, expected count-phrase captures]
+  type PRow = Row & { notes: string[]; counts: [string, string] | null };
+  const partial: PRow[] = [
+    { name: "page budget, short-circuit", marker: /^Found 30 Meetings/m, counts: null,
+      notes: ["Note: listing stopped at the page budget — read 2 pages (200 summaries)", "Note: showing the first 30 of 200 matching Meetings (limit)"],
+      res: await run({ page_budget: 2 }, { structurePages: { meeting: pagesOf(many) } }) },
+    { name: "tag listing at the page budget", marker: /^Found 30 Meetings tagged "product"/m, counts: null,
+      notes: ["Note: listing stopped at the page budget — read 1 pages (100 summaries)", "Note: showing the first 30 of 100"],
+      res: await run({ tag: "product", page_budget: 1 }, { base: { search: { product: PRODUCT_TAG_HIT } }, tagPages: { [TAG_PRODUCT]: pagesOf(many) } }) },
+    { name: "rate-stopped listing, short-circuit (partial none)", marker: /\(no matching Meetings in the part of the listing that was read\)$/m, counts: null,
+      notes: ["Note: rate limit reached while listing — read 0 page(s)"],
+      res: await run({}, { structurePages: { meeting: [{ fail: slow }] } }) },
+    { name: "rate-stopped listing, stage 2 (partial none)", marker: /\(no matching Meetings in the part of the listing that was read\)$/m, counts: null,
+      notes: ["Note: rate limit reached while listing — read 0 page(s)"],
+      res: await run({ sort: SORT_DATE_DESC }, { structurePages: { meeting: [{ fail: slow }] } }) },
+    { name: "unreadable page (HTML 200)", marker: /\(no matching Meetings in the part/m, counts: null,
+      notes: ["Note: listing stopped after 0 page(s) because a page could not be read ("],
+      res: await run({}, { structurePages: { meeting: [{ html: "<!doctype html>" }] } }) },
+    { name: "listing error with a long multi-line body (capped detail)", marker: /could not be read \(API error 500: x{20}/, counts: null,
+      notes: ["Note: listing stopped after 1 page(s) because a page could not be read (API error 500: xxx", "Note: showing the first 30 of 100"],
+      res: await run({}, { structurePages: { meeting: onePageThenFail(100, { status: 500, text: longBody }) } }) },
+    { name: "no cursor", marker: /^Found 30 Meetings/m, counts: null,
+      notes: ["Note: the listing reported more pages but returned no usable cursor — read 1 page(s)", "Note: showing the first 30 of 40"],
+      res: await run({}, { structurePages: { meeting: [{ results: forty, hasMore: true, nextCursor: null }] } }) },
+    { name: "short-circuit row cap, undated (listing-order line)", marker: /\(None of the 40 candidate titles carries a date, so the 30 kept/m, counts: null,
+      notes: ["Note: showing the first 30 of 40 matching Meetings (limit)"],
+      res: await run({}, { structurePages: { meeting: pagesOf(forty) } }) },
+    { name: "fetch_cap, search-rank order (extremum caveat)", marker: /\(Sorted within the 2 candidates read only/m, counts: null,
+      notes: ["Note: fetched the first 2 of 5 candidates (fetch_cap) in search-rank order; raise fetch_cap"],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC, fetch_cap: 2 }, { base: { search: { Note: five } } }) },
+    { name: "fetch_cap, enumerated, most recent first", marker: /\(Sorted within the 5 candidates read only/m, counts: null,
+      notes: ["Note: fetched the first 5 of 40 candidates (fetch_cap) most recent first by title date"],
+      res: await run({ sort: SORT_DATE_DESC, fetch_cap: 5 }, { structurePages: { meeting: pagesOf(fortyDated) } }) },
+    { name: "fetch_cap, enumerated, oldest first", marker: /\(Sorted within the 5 candidates read only/m, counts: null,
+      notes: ["Note: fetched the first 5 of 40 candidates (fetch_cap) oldest first by title date"],
+      res: await run({ sort: SORT_DATE_ASC, fetch_cap: 5 }, { structurePages: { meeting: pagesOf(fortyDated) } }) },
+    { name: "fetch_cap, enumerated, undated (listing order + listing-order line)", marker: /\(None of the 40 candidate titles carries a date, so the 5 kept/m, counts: null,
+      notes: ["Note: fetched the first 5 of 40 candidates (fetch_cap) in listing order"],
+      res: await run({ sort: SORT_DATE_DESC, fetch_cap: 5 }, { structurePages: { meeting: pagesOf(forty) } }) },
+    { name: "fetch_cap over filters (sampling body, nothing errored)", marker: /\(none of the 2 candidates read matched the filters — 3 were not fetched\)$/m, counts: null,
+      notes: ["Note: fetched the first 2 of 5 candidates (fetch_cap) in search-rank order"],
+      res: await run({ title_hint: "Note", fetch_cap: 2, filters: { Status: "Done" } }, { base: { search: { Note: five } } }) },
+    { name: "errored candidate alone", marker: /^\*\*Weekly Review\*\*\nID: m2$/m, counts: null,
+      notes: ["Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Weekly Review", sort: SORT_DATE_DESC },
+        { base: { search: { "Weekly Review": [mixed[0], { id: "m2", title: "Weekly Review", structureId: "meeting" }] }, getFail: { m1: { status: 500, text: "boom" } } } }) },
+    { name: "errored + fetch_cap (sampling body names both)", marker: /\(none of the 1 candidates read matched the filters — 2 could not be read, 2 were not fetched\)$/m, counts: null,
+      notes: ["Note: fetched the first 3 of 5 candidates (fetch_cap)", "Note: 2 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", fetch_cap: 3, filters: { Status: "Done" } },
+        { base: { search: { Note: five }, getFail: { m1: { status: 500, text: "boom" }, m2: { status: 500, text: "boom" } } } }) },
+    { name: "errored + stage-2 rate stop", marker: /\(Sorted within the 1 candidates read only/m, counts: ["2", "5"],
+      notes: ["Note: rate budget reached — checked 2 of 5 candidates", "Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five }, getFail: { m1: { status: 500, text: "boom" }, m3: slow } } }) },
+    { name: "stage-2 rate stop on the first GET", marker: /\(none of the 0 candidates read/m, counts: ["0", "3"],
+      notes: ["Note: rate budget reached — checked 0 of 3 candidates"],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five.slice(0, 3) }, getFail: { m1: slow } } }) },
+    // The stage-2 rate Note is the ONLY carrier of the phrase, with plain-integer
+    // counts — 1200 must not render as "1,200" (U6). 1200 undated titles keep id
+    // order, so the second GET is uid(2).
+    { name: "stage-2 rate stop over 1200", marker: /\(Sorted within the 1 candidates read only/m, counts: ["1", "1200"],
+      notes: ["Note: rate budget reached — checked 1 of 1200 candidates"],
+      res: await run({ sort: SORT_DATE_DESC }, { structurePages: { meeting: pagesOf(summaries(1, 1200, n => `Sync ${n}`)) }, base: { getFail: { [uid(2)]: slow } } }) },
+    // Page budget THEN a stage-2 rate stop: the phrase carries stage-2 counts (200
+    // candidates), never pages (2) or summaries (250).
+    { name: "page budget + stage-2 rate stop", marker: /\(Sorted within the 1 candidates read only/m, counts: ["1", "200"],
+      notes: ["Note: listing stopped at the page budget — read 2 pages", "Note: rate budget reached — checked 1 of 200 candidates"],
+      res: await run({ sort: SORT_DATE_DESC, page_budget: 2 }, { structurePages: { meeting: pagesOf(many) }, base: { getFail: { [uid(2)]: slow } } }) },
+    { name: "request budget clamps pages and fetches", marker: /\(Sorted within the 30 candidates read only/m, counts: null,
+      notes: ["Note: listing stopped at the page budget (14 pages, clamped from 25 by the per-call request budget of 45)",
+              "Note: fetched the first 30 of 1400 candidates (per-call request budget of 45) in listing order; narrow the seed."],
+      res: await run({ page_budget: 25, fetch_cap: 50, sort: SORT_DATE_DESC }, { structurePages: { meeting: pagesOf(huge) } }) },
+    { name: "request budget clamps fetches after a failed listing call", marker: /\(Sorted within the 42 candidates read only/m, counts: null,
+      notes: ["Note: listing stopped after 1 page(s) because a page could not be read (API error 500: boom)",
+              "Note: fetched the first 42 of 100 candidates (per-call request budget of 45)"],
+      res: await run({ sort: SORT_DATE_DESC, fetch_cap: 50 }, { structurePages: { meeting: onePageThenFail(100, { status: 500, text: "boom" }) } }) },
+    { name: "escalation at the page budget", marker: /\(The title search returned its 50-result maximum, so the Meetings were listed instead: 2 page\(s\), 200 summaries/, counts: null,
+      notes: ["Note: listing stopped at the page budget — read 2 pages", "Note: showing the first 30 of 200"],
+      res: await run({ title_hint: "Sync", page_budget: 2 }, { base: { search: { Sync: many.slice(0, 50) } }, structurePages: { meeting: pagesOf(many) } }) },
+    { name: "escalation, rate-stopped listing, zero matches (partial none)", marker: /\(no matching Meetings in the part of the listing that was read\)$/m, counts: null,
+      notes: ["Note: rate limit reached while listing — read 0 page(s)"],
+      res: await run({ title_hint: "Retro" }, { base: { search: { Retro: summaries(1001, 1050, n => `Planning ${n}`) } }, structurePages: { meeting: [{ fail: slow }] } }) }
+  ];
+
+  // Preconditions first, and unanchored so a line that gained a "Note: " prefix
+  // still matches — a marker that broke would turn a contract failure into a
+  // fixture failure. Without the marker a row could silently test another shape.
+  for (const row of [...complete, ...partial]) {
+    assert.equal(row.res.isError, undefined, `${row.name}: ${row.res.content[0].text}`);
+    assert.match(row.res.content[0].text, row.marker, `${row.name}: fixture did not produce its shape:\n${row.res.content[0].text}`);
+  }
+  for (const row of complete) {
+    const text = row.res.content[0].text as string;
+    assert.equal(paIncomplete(text), false, `${row.name} must read complete:\n${text}`);
+    assert.deepEqual(noteLines(text), [], `${row.name}: no Note line`);
+  }
+  for (const row of partial) {
+    const text = row.res.content[0].text as string;
+    assert.equal(paIncomplete(text), true, `${row.name} must read incomplete:\n${text}`);
+    assert.match(text, PA_NOTE_RE, `${row.name}: incompleteness is always a Note: line`);
+    const m = text.match(PA_COUNTS_RE);
+    assert.deepEqual(m ? [m[1], m[2]] : null, row.counts, `${row.name}: count phrase`);
+    // Exactly the expected Notes, in order — so an informational line that turned
+    // into a Note is caught even in a shape that already carries real Notes.
+    const notes = noteLines(text);
+    assert.equal(notes.length, row.notes.length, `${row.name}: Note lines:\n${notes.join("\n")}`);
+    row.notes.forEach((p, i) => assert.ok(notes[i].startsWith(p), `${row.name}: Note ${i} = ${notes[i]}`));
+  }
+  for (const row of [...complete, ...partial]) {
+    const text = row.res.content[0].text as string;
+    // Any count phrase is the stage-2 rate Note, and N/M are what stage 2 reports
+    // as considered/seed_size — never pages or summaries.
+    for (const line of text.split("\n").filter(l => PA_COUNTS_RE.test(l))) {
+      assert.ok(line.startsWith("Note: rate budget reached — checked "), `${row.name}: count phrase outside the rate Note: ${line}`);
+      const m = line.match(PA_COUNTS_RE)!;
+      assert.deepEqual([Number(m[1]), Number(m[2])], [row.res.structuredContent.considered, row.res.structuredContent.seed_size], `${row.name}: N/M`);
+    }
+    // PA's verdict agrees with the structured exactness on every shape.
+    const sc = row.res.structuredContent;
+    assert.equal(paIncomplete(text), !(sc.seed_complete && sc.candidates_complete), `${row.name}: PA verdict vs structuredContent`);
+  }
+
+  const canaryRow = complete[complete.length - 1];
+  assert.equal(canaryRow.stderr!.length, 1, "the canary fired");
+  assert.match(canaryRow.stderr![0], new RegExp(`fidelity canary: 1 .*${uid(5000)}`));
+  assert.doesNotMatch(canaryRow.res.content[0].text, /canary|5000/, "the canary stays out of the tool text");
+});
