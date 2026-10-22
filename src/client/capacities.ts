@@ -1,5 +1,6 @@
 
 // File: src/client/capacities.ts - Using native fetch
+import { errorBodyText } from "../utils/error-text.js";
 import { CapacitiesSpace, CapacitiesStructure, SearchResult, SearchOptions, SaveWeblinkOptions, SaveToDailyNoteOptions, CapacitiesObject, ObjectPage } from "./types.js";
 
 // Rate-limit window length (ms). Exported so composite-write callers can seed a
@@ -75,25 +76,28 @@ export class CapacitiesClient {
       } catch {
         /* ignore */
       }
+      // The message is echoed into tool output, so it carries a shaped body
+      // (JSON kept, anything else cut to one line); details.body stays raw (cap-dnf).
+      const shown = errorBodyText(body);
 
       if (response.status === 429) {
         const retryAfter = response.headers.get("retry-after");
         throw new CapacitiesAPIError(
           "RATE_LIMIT_EXCEEDED",
-          "Rate limit exceeded" + (body ? `: ${body}` : ""),
+          "Rate limit exceeded" + (shown ? `: ${shown}` : ""),
           { status: 429, body, ...(retryAfter ? { retryAfter } : {}) }
         );
       }
       if (response.status === 401) {
         throw new CapacitiesAPIError(
           "AUTHENTICATION_FAILED",
-          "Invalid API token" + (body ? `: ${body}` : ""),
+          "Invalid API token" + (shown ? `: ${shown}` : ""),
           { status: 401, body }
         );
       }
       throw new CapacitiesAPIError(
         "API_ERROR",
-        `API error ${response.status}${body ? ": " + body : ""}`,
+        `API error ${response.status}${shown ? ": " + shown : ""}`,
         { status: response.status, body }
       );
     }

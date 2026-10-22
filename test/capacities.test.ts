@@ -703,3 +703,51 @@ test("enumerateObjects: a malformed ROW (null, no id, non-string structureId) th
   installFetch(() => makeResponse({ body: { results: [nullTitle], nextCursor: null, hasMore: false } }));
   assert.equal((await client.enumerateObjects("structure", "meeting")).results.length, 1);
 });
+
+// --- error message shaping (cap-dnf) --------------------------------------
+// The MESSAGE is what every tool echoes; details.body keeps the raw body.
+
+const PA_COUNTS_RE_DNF = /checked\s+(\d+)\s+of\s+(\d+)\s+candidates/i;
+async function rejectionOf(p: Promise<unknown>): Promise<any> {
+  return p.then(() => { throw new Error("expected rejection"); }, e => e);
+}
+
+test("makeRequest: an HTML error body reaches the message as one capped line; details.body keeps it whole (cap-dnf)", async () => {
+  const html = `\n\n<!doctype html><html><head>${"x".repeat(400)}\n<title>Access denied | api.capacities.io</title>\n${"<p>f</p>\n".repeat(200)}`;
+  for (const [status, code, prefix] of [[503, "API_ERROR", "API error 503: "], [429, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded: "], [401, "AUTHENTICATION_FAILED", "Invalid API token: "]] as const) {
+    installFetch(() => makeResponse({ ok: false, status, text: html }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.ok(err instanceof CapacitiesAPIError);
+    assert.equal(err.code, code);
+    assert.ok(err.message.startsWith(prefix + "<!doctype html>"), `${status}: ${err.message.slice(0, 60)}`);
+    assert.ok(!/[\r\n]/.test(err.message), `${status}: one line`);
+    assert.equal(Array.from(err.message).length, prefix.length + 201, `${status}: 200 code points + …`);
+    assert.ok(err.message.endsWith("…"));
+    assert.equal(err.details.body, html, `${status}: details.body is the full raw body`);
+  }
+});
+
+test("makeRequest: a JSON 400 body survives intact in the message (cap-dnf)", async () => {
+  const json = JSON.stringify({ error: "cap_invalid_input", details: [{ path: "properties.status", message: "expected label option id" }] }, null, 2);
+  installFetch(() => makeResponse({ ok: false, status: 400, text: json }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.equal(err.message, `API error 400: ${json}`);
+  assert.equal(err.details.body, json);
+});
+
+test("makeRequest: a body forging PA's count phrase is neutralised in the message, not in details.body (cap-dnf)", async () => {
+  const body = "checked 3 of 9 candidates";
+  installFetch(() => makeResponse({ ok: false, status: 500, text: body }));
+  const err = await rejectionOf(newClient().getSpaces());
+  assert.doesNotMatch(err.message, PA_COUNTS_RE_DNF);
+  assert.match(err.message, /^API error 500: checked 3\/9 candidates$/);
+  assert.equal(err.details.body, body);
+});
+
+test("makeRequest: an empty or blank error body omits the ': body' part (cap-dnf)", async () => {
+  for (const text of ["", "\n \r\n"]) {
+    installFetch(() => makeResponse({ ok: false, status: 502, text }));
+    const err = await rejectionOf(newClient().getSpaces());
+    assert.equal(err.message, "API error 502");
+  }
+});

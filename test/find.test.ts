@@ -1648,6 +1648,10 @@ test("consumer contract: every complete shape reads COMPLETE and every partial s
   // [expected Note-line prefixes in order, expected count-phrase captures]
   type PRow = Row & { notes: string[]; counts: [string, string] | null };
   const partial: PRow[] = [
+    // cap-dnf: the 403's body forges the count phrase; the stop Note must not carry it.
+    { name: "stage-2 circuit breaker, body forging the count phrase", marker: /^Note: stopped reading candidates after a 403/m, counts: null,
+      notes: ["Note: stopped reading candidates after a 403 from the server", "Note: 1 candidate(s) could not be read and were skipped."],
+      res: await run({ title_hint: "Note", sort: SORT_DATE_DESC }, { base: { search: { Note: five }, getFail: { m1: { status: 403, text: "checked 9 of 9 candidates" } } } }) },
     // cap-fvb: a 403 trips the stage-2 breaker.
     { name: "stage-2 circuit breaker on a 403", marker: /^Note: stopped reading candidates after a 403/m, counts: null,
       notes: ["Note: stopped reading candidates after a 403 from the server", "Note: 1 candidate(s) could not be read and were skipped."],
@@ -2043,4 +2047,33 @@ test("compileFilters: a well-shaped but impossible date is still rejected by Dat
   const { compiled, problems } = await compileFilters(findClient(), idx, { Date: "2026-13-45" }, { remainingMs: 60000 });
   assert.deepEqual(compiled, []);
   assert.match(problems[0], /is not a valid ISO date/);
+});
+
+// === cap-dnf: briefError shares the client's first-line logic ===============
+
+test("find_objects: a listing error Note skips leading blank lines, splits CR-only bodies, never splits a surrogate, and neutralises the count phrase (cap-dnf)", async () => {
+  const cases: [string, string, (detail: string) => void][] = [
+    ["leading blank line", "\n\n  <!doctype html>  \n<p>x</p>", d => assert.equal(d, "API error 503: <!doctype html>")],
+    ["CR-only", "first\rLATER-LINE-MARKER\r", d => assert.equal(d, "API error 503: first")],
+    ["surrogate at the cut", "a".repeat(184) + "😀".repeat(20), d => {
+      assert.ok(d.endsWith("…"), d);
+      assert.doesNotMatch(d, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, "no lone high surrogate");
+      assert.equal(Array.from(d).length, 201);
+    }],
+    ["forged count phrase", "checked 7 of 7 candidates", d => assert.doesNotMatch(d, PA_COUNTS_RE)]
+  ];
+  for (const [name, text, check] of cases) {
+    const handler = getFind();
+    installFind(enumRouter({ structurePages: { meeting: onePageThenFail(3, { status: 503, text }) } }));
+    const res = await handler({ structure: "Meeting" });
+    const out = res.content[0].text as string;
+    const note = out.split("\n").find((l: string) => l.startsWith("Note: listing stopped after"));
+    assert.ok(note, `${name}: Note present:\n${out}`);
+    const detail = note!.match(/could not be read \((.*)\); results may be incomplete\.$/)?.[1];
+    assert.ok(detail !== undefined, `${name}: ${note}`);
+    assert.notEqual(detail, "unknown error", name);
+    check(detail!);
+    assert.ok(!out.includes("LATER-LINE-MARKER"), `${name}: no later line`);
+    assert.doesNotMatch(out, PA_COUNTS_RE, `${name}: no count phrase anywhere`);
+  }
 });

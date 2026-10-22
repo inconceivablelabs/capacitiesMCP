@@ -28,6 +28,7 @@ import { resolveEntities, SEARCH_LIMIT } from "./resolution.js";
 import { enumerateAll, EnumerationResult } from "./enumerate.js";
 import { normalizeName as normalize, normalizeForTitleMatch, matchesTitle } from "../utils/normalize.js";
 import { isSpecUuid } from "../utils/validation.js";
+import { firstLineBrief } from "../utils/error-text.js";
 import { parseTitleDate, orderEnumerated } from "../utils/title-date.js";
 
 // --- Seed shapes + exactness (cap-i93) --------------------------------------
@@ -88,13 +89,11 @@ function parseFilterDate(s: string): number {
 // Stage 2 stops after this many read errors in a row (cap-fvb).
 const MAX_CONSECUTIVE_READ_ERRORS = 3;
 
-// An API error message carries the whole HTTP body (a Cloudflare page runs to
-// thousands of characters), and that body is server-controlled text landing in
-// tool output. Keep the first line, which holds the status, and cap it.
+// An API error message is server-controlled text landing in tool output, and a
+// JSON body in it may span lines. Keep the first non-blank line, which holds the
+// status, capped and with the count phrase neutralised (cap-dnf).
 function briefError(message: string | undefined): string {
-  const first = (message ?? "").split("\n", 1)[0].trim();
-  if (!first) return "unknown error";
-  return first.length > ERROR_DETAIL_MAX ? first.slice(0, ERROR_DETAIL_MAX) + "…" : first;
+  return firstLineBrief(message, ERROR_DETAIL_MAX) || "unknown error";
 }
 
 // zod's bounds and defaults are applied by the MCP SDK's input parse, NOT on a
