@@ -154,6 +154,15 @@ Objects have two content layers, handled differently — this is the central men
   citing its result rather than shipping it. Caught 2026-08-21 (cap-i93): a design doc instructed "a fixture of
   the 469 real titles" and survived four review passes — every reviewer was scoped to *is the design correct*,
   nobody to *what does this publish*. Ask that second question separately.
+- **Tool TEXT output is a contract: other code parses it.** PA's `scripts/backfill_meeting_titles.py`
+  reads ANY line starting `Note:` in `find_objects` output as "sweep incomplete" and fails the run,
+  and `gateway_client.py` regex-parses `search_content`'s `**Title**\nID:` blocks. So a `Note:` line
+  must mean incomplete, and informational lines must not start with it. Before changing the output
+  format, grep personal-assistant for the tool name and run the real parser on the new output.
+  (cap-1kc `e1cba05`, 2026-10-21.)
+- **`/objects/search` returns semantic hits too**, interleaved with title matches and unmarked. Only
+  `matchesTitle` (`src/utils/normalize.ts`) says which hits are title matches. Below the 50 cap,
+  every title match is still returned. (cap-1kc, live probe 2026-10-21.)
 - TypeScript pinned to **5.3.3** — 5.9.x OOMs in memory-constrained environments.
 
 ### Design docs
@@ -192,6 +201,9 @@ npm run build
 docker build -f server/Dockerfile -t ghcr.io/inconceivablelabs/capacitiesmcp:latest .
 cd ../mcp-gateway && docker compose restart mcp-gateway   # re-reads catalog/config, respawns child
 ```
+From this devcontainer, `docker build` fails with `error getting credentials … exit status 255`
+whenever it must pull a base image. Build with an empty config instead:
+`DOCKER_CONFIG=<dir holding {}> docker build …` (shared memory `docker-pull-needs-empty-docker-config`).
 **Tag the rollback BEFORE rebuilding.** Rebuilding onto `:latest` can leave the prior image
 unrecoverable — it is not reliably retained as a dangling `<none>` (verified cap-d8f 2026-08-17:
 `docker image inspect <old-id>` → `No such image`). If the tag is already gone, rebuild the
@@ -247,5 +259,6 @@ Use the bundled `capacities-desktop-extension.dxt` for one-click installation.
 *Last 3 sessions. Deeper history: git log, beads, journal.
 Cross-project orientation: `knowledge/self/work-context.md`.*
 
+- **2026-10-21 —** **Two releases and a README refresh, all deployed.** Capacities search now also returns hits that match by meaning. 2.1.1 (cap-1kc, `a7f54e4`+`e1cba05`): `find_objects` keeps title matches only, and `search_content` labels the rest "Related by meaning". 2.1.2 (cap-21w, `562fee0`): SDK 1.32.1, 46 → 0 Dependabot alerts, none reachable on stdio. README (cap-nc0, `1c3f7d9`) adds a dated "Why this server?" comparison vs the official MCP and the `@capacities/api` SDK; the `.dxt` was repacked at 2.1.2 (it had been stale at 2.1.0). Closed cap-1r7; the SDK was rejected (cap-5l8: needs zod 4, hardcodes API 1.0.0). Janet's instruction line is committed in PA (`b315b59`) and goes live on PA's next rebuild. Open: **cap-42j** (small `limit` lets semantic hits crowd out title matches), **cap-yp9** (RateLimit header is `"30-in-1min"; r=..; t=..`, not the documented format), cap-i93 (its matcher now lives in `utils/normalize.ts`), cap-9js (zod 4: unblocked, 7 `z.record` sites), cap-8h5, plus the API-gap beads (cap-6au/zwo/bmr/dpg/eim). Theme: **a text-output tool has parsing consumers.** PA's backfill treats any `Note:` line as "incomplete", and a benign note would have failed every run. Grep consumers before changing tool output. *Journal: 2026-10-21.*
 - **2026-08-18 —** **Two security beads closed and deployed** — cap-d8f took all 64 Dependabot alerts to 0 (every one transitive under `@modelcontextprotocol/sdk`; the HTTP-transport half was never reachable on our stdio path) and cap-0yr moved the base image off EOL `node:18-slim` (unpatched since 2025-04-30) to `node:22-slim`, chosen for test parity with the devcontainer. Merged `9b5cbad` + `f0158a1`; gateway now runs the pulled CI artifact with digest parity verified, Janet untouched across both restarts. Also fixed a pre-existing stale `serverInfo` 2.0.0 and pinned all four version sites with a test. Open: **dc-6hp** (dependabot docker rollout — 7 repos, incl. google-mcp's placeholder config that runs nothing; Dependabot's major-bump behaviour still unverified, and microsoft-mcp's docker entry is a free natural experiment whose first Monday run is 08-24), **cap-1r7** (Janet carry-forward live proof), **cap-xom**, cap-9ti/t7n/7xe. Theme: **probes that lie** — three of four real findings came from checks that failed in reassuring ways (a version test reddening on its own `ERR_INVALID_URL`, a stdio smoke silent 2/3 of runs on a stdin-EOF race, a stderr read that zsh MULTIOS turned into a stdout read); and the deploy runbook's "prior image survives as dangling `<none>`" assumption is FALSE — corrected in global + project CLAUDE.md, rollback must be tagged before rebuilding. *Journal: 2026-08-18.*
 - **2026-07-13 —** **find_objects SHIPPED + DEPLOYED (v2.1.0)** — full arc in one session: design review-corrected (two-agent pass killed the original props+body×50 pacing sketch → JSON-only locate primitive, fetch_cap 30/50, fail-open partials), plan drafted by dispatched agent + dual plan-review, 9 tasks via subagent-driven development (PR #30 → main `1bb0806`, 113/113), stdio smoke + live-space smoke both green, gateway restarted (11 tools), consumer-verified from Tom's reconnected session on the real 14-identical-titles case; release `a3b9ba4` (.dxt repacked — manifest `tools:` array is hand-maintained, was silently stale at 10). Product framing settled: **Janet-first, then generalize**; 3-layer model (parity floor ceded to official MCP / gap-fillers with designed half-life / durable workflow layer). QA doctrine shipped to skills (`01a8c78`): writing-plans System Verification section + QA-coverage reviewer ("B's brain in C's body"), SDD implementer mechanical-QA block (duration-regression gate), assemble-and-run demoted to conditional. Open: **cap-1r7** (Janet instruction updates + carry-forward live proof — Tom running separately; + A13 fetch_cap=50 timing), cap-9ti (Date.parse polish), cap-t7n (new block-edit endpoints), cap-7xe (daily-note date). Theme: the Janet carry-forward run is the first layer-3 "was it compelling" signal; block-edit endpoints (t7n) are the API riding up under us within 24h of the design. *Journal: 2026-07-13.*
