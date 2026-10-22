@@ -1951,6 +1951,22 @@ function fiveNotes() {
   return [1, 2, 3, 4, 5].map(n => ({ id: `m${n}`, title: "Note", structureId: "meeting" }));
 }
 
+// A 401 mid-loop means the token was revoked: every remaining GET would fail the
+// same way, so it stops at once like a 403 rather than reading through the list.
+test("find_objects: a 401 on a stage-2 GET stops the loop at once — no further GETs (cap-fvb)", async () => {
+  const handler = getFind();
+  const calls = installFind(findRouter({
+    search: { Note: fiveNotes() },
+    getFail: { m2: { status: 401, text: "Unauthorized" } }
+  }));
+  const res = await handler({ structure: "Meeting", title_hint: "Note", sort: SORT_DATE_DESC });
+  assert.deepEqual(fetchedIds(calls), ["m1", "m2"], "no GET after the 401");
+  const text = res.content[0].text as string;
+  assert.match(text, /^Note: stopped reading candidates after a 401 from the server/m);
+  assert.doesNotMatch(text, PA_COUNTS_RE);
+  assert.equal(exactnessOf(res).candidates_complete, false);
+});
+
 test("find_objects: a 403 on the first stage-2 GET stops the loop at once — exactly 1 GET, a stop Note, candidates incomplete (cap-fvb)", async () => {
   const handler = getFind();
   const calls = installFind(findRouter({
