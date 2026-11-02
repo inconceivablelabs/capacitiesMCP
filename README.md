@@ -83,11 +83,13 @@ removes the base image's bundled `npm`/`npx`, which the server never runs.
 | `get_space_info` | List the space's structures: their properties, label options, and relation targets |
 | `create_object` | Create an object of any structure with typed properties, labels, and relations (set by name, resolved strictly), plus a markdown body |
 | `update_object` | Update an existing object's properties/relations (replaces each named property's value) and append a body |
-| `get_object` | Read an object as Markdown (frontmatter + body) |
+| `get_object` | Read an object as Markdown (frontmatter + body), with a `Labels:` line before it listing every label property (Status, Priority, ...) read from the structured object. Where the two disagree, trust the `Labels:` line: Capacities' Markdown omits some statuses (Open Question, Backlog, On Hold) and shows Complete as Done |
 | `append_to_object` | Append markdown content to an object's body without touching its properties |
 | `delete_object` | Delete an object (moves to trash by default; `hard_delete` for permanent) |
 | `save_weblink` | Save a URL as a Weblink, auto-fetching page metadata (override `title`/`description`) |
 | `add_to_daily_note` | Append content to today's daily note |
+| `link_to_context` | Add a task to another object's Context (a person, project, meeting, ...). Context in Capacities is derived from embeds: an object is in a task's Context when its body embeds the task. This appends that embed, and does nothing if the object already embeds the task |
+| `unlink_from_context` | Remove a task from another object's Context by deleting every embed of the task in that object's body |
 
 > **Single-space per token.** A v2 API token is scoped to exactly one space; `list_spaces`
 > returns that one space. To work with multiple spaces, use multiple tokens.
@@ -168,7 +170,7 @@ Both are moving, so check them before relying on this table.*
 |---|---|---|---|
 | What it is | Local MCP server (stdio), personal API token | Hosted MCP server at `https://api.capacities.io/mcp`, OAuth 2.1 | TypeScript client library, not an MCP server |
 | Setup | `.dxt`, Node, or Docker; token in env | Add the URL to your MCP client and sign in. The space must have AI Assistant enabled | `npm install`, then write your own code |
-| Coverage | The 11 tools above | Search, read, create (pages, tasks, any type), update properties, append, **block-level edits**, **file upload**, list by type/tag/collection, object links | **All 22 REST endpoints**, plus OAuth with token refresh |
+| Coverage | The 13 tools above | Search, read, create (pages, tasks, any type), update properties, append, **block-level edits**, **file upload**, list by type/tag/collection, object links | **All 22 REST endpoints**, plus OAuth with token refresh |
 | Relations and tags on create/update | Set by name, resolved strictly. Unknown or ambiguous names fail before anything is written (auto-create is opt-in) | Properties are set from frontmatter; how relation names are resolved is not documented | You pass ids; name lookup is up to you |
 | Property keys | Property name or id | Frontmatter keys | Ids |
 | Filter by date, label, relation or value | `find_objects` | List by object type, tag or collection; other filters not documented | Not provided |

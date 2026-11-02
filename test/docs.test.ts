@@ -9,7 +9,7 @@ import path from "node:path";
 const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
 // manifest.json's tools[] is hand-maintained and the standard post-pack check
-// (version + 11 tools) passes with a stale description (project CLAUDE.md), so
+// (version + 13 tools) passes with a stale description (project CLAUDE.md), so
 // the description itself is pinned.
 test("manifest.json describes find_objects' tag and whole-type listing, not a title-seed-only search", () => {
   const manifest = JSON.parse(readFileSync(path.join(repoRoot, "manifest.json"), "utf8"));
@@ -18,7 +18,7 @@ test("manifest.json describes find_objects' tag and whole-type listing, not a ti
   assert.match(entry.description, /tag/);
   assert.match(entry.description, /lists the whole type/);
   assert.doesNotMatch(entry.description, /title-seed search/);
-  assert.equal(manifest.tools.length, 11);
+  assert.equal(manifest.tools.length, 13);
 });
 
 test("README's find_objects row describes tag and whole-type listing", () => {
