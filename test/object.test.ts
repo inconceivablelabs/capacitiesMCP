@@ -1620,3 +1620,180 @@ test("create: a multi-line JSON 400 body is surfaced intact in isError text (cap
   assert.equal(res.isError, true);
   assert.ok(res.content[0].text.includes(json), res.content[0].text);
 });
+
+// === cap-ldk: get_object Labels line read from the structured object =======
+// Capacities' /object/markdown frontmatter omits some statuses (Open Question,
+// Backlog, On Hold) and renders Complete as "Done"; the Labels line is read from
+// GET /object JSON. The markdown itself must stay byte-for-byte (PA parses it).
+
+const LDK_MD = "---\ntitle: Synthetic Task\ndate: 2026-01-02\n---\n\nBody line";
+
+function labelProp(...names: string[]) {
+  return { type: "label", label: names.map((name, i) => ({ id: `opt-${i}`, name })) };
+}
+
+test("get_object (cap-ldk): Open Question in JSON, absent from markdown → Labels line shows it", async () => {
+  const { handler } = getTool("get_object");
+  const calls = installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: LDK_MD },
+      getObject: objectFixture({
+        title: { type: "title", title: { value: "Synthetic Task" } },
+        status: labelProp("Open Question"),
+        priority: labelProp("High")
+      })
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.isError, undefined);
+  assert.equal(
+    res.content[0].text,
+    "Structure: RootTask\nLabels: status: Open Question; priority: High\n\n" + LDK_MD
+  );
+  const jsonCall = calls.find(c => c.url.includes("/object?id=task-1") && (c.opts?.method ?? "GET") === "GET");
+  assert.ok(jsonCall, "GET /object (JSON) must happen");
+});
+
+test("get_object (cap-ldk): Complete in JSON + 'status: Done' frontmatter → frontmatter untouched, line says Complete", async () => {
+  const { handler } = getTool("get_object");
+  const md = "---\ntitle: Synthetic Task\nstatus: Done\n---\n\nBody";
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: md },
+      getObject: objectFixture({ status: labelProp("Complete") })
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.isError, undefined);
+  const text: string = res.content[0].text;
+  assert.ok(text.endsWith("\n\n" + md), "markdown must be appended byte-for-byte");
+  assert.match(text, /\nstatus: Done\n/);
+  assert.match(text, /^Labels: status: Complete$/m);
+});
+
+test("get_object (cap-ldk): multi-select joined by ', '; empty label array → (none)", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: LDK_MD },
+      getObject: objectFixture({
+        status: { type: "label", label: [] },
+        tags: labelProp("Alpha", "Beta")
+      })
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(
+    res.content[0].text,
+    "Structure: RootTask\nLabels: status: (none); tags: Alpha, Beta\n\n" + LDK_MD
+  );
+});
+
+test("get_object (cap-ldk): status key omitted from JSON → no status entry", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: LDK_MD },
+      getObject: objectFixture({
+        title: { type: "title", title: { value: "Synthetic Task" } },
+        priority: labelProp("Low")
+      })
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.content[0].text, "Structure: RootTask\nLabels: priority: Low\n\n" + LDK_MD);
+  assert.doesNotMatch(res.content[0].text, /status/);
+});
+
+test("get_object (cap-ldk): no label-typed properties → output byte-identical to the markdown-only render", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "p-1", structureId: "person", markdown: LDK_MD },
+      getObject: objectFixture(
+        {
+          title: { type: "title", title: { value: "Synthetic Person" } },
+          tags: { type: "entity", entity: [] }
+        },
+        "person"
+      )
+    })
+  );
+
+  const res = await handler({ objectId: "p-1" });
+
+  assert.equal(res.content[0].text, "Structure: person\n\n" + LDK_MD);
+});
+
+test("get_object (cap-ldk): no structureId → Labels line is the first line", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "", markdown: LDK_MD },
+      getObject: objectFixture({ status: labelProp("Next Up") })
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.content[0].text, "Labels: status: Next Up\n\n" + LDK_MD);
+});
+
+test("get_object (cap-ldk): JSON read 429 → markdown still returned with 'Labels: unavailable (…)'", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: LDK_MD },
+      getFail: { status: 429, text: "slow down" }
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.isError, undefined);
+  const text: string = res.content[0].text;
+  assert.ok(text.startsWith("Structure: RootTask\nLabels: unavailable (Rate limit exceeded"), text);
+  assert.ok(text.endsWith(")\n\n" + LDK_MD), text);
+});
+
+test("get_object (cap-ldk): markdown read fails → isError even when the JSON read succeeds", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdownFail: { status: 404, text: "cap_not_found: synthetic" },
+      getObject: objectFixture({ status: labelProp("Next Up") })
+    })
+  );
+
+  const res = await handler({ objectId: "missing" });
+
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /^Failed to read object: .*cap_not_found: synthetic/);
+});
+
+test("get_object (cap-ldk): a multi-line JSON error from the JSON read stays on ONE Labels line", async () => {
+  const { handler } = getTool("get_object");
+  installFetch(
+    router({
+      markdown: { id: "task-1", structureId: "RootTask", markdown: LDK_MD },
+      getFail: { status: 500, text: '{\n"date": "x",\n"title": "y"\n}' }
+    })
+  );
+
+  const res = await handler({ objectId: "task-1" });
+
+  assert.equal(res.isError, undefined);
+  const lines: string[] = res.content[0].text.split("\n");
+  assert.equal(lines[0], "Structure: RootTask");
+  assert.match(lines[1], /^Labels: unavailable \(API error 500: .*"date": "x".*\)$/);
+  assert.equal(lines[2], "");
+  assert.equal(lines.slice(3).join("\n"), LDK_MD);
+});

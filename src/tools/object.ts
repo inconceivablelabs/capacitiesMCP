@@ -421,6 +421,37 @@ export async function finalizeRelationPlans(
 
 // --- Tool registration -----------------------------------------------------
 
+// get_object's Labels line (cap-ldk): one `<propId>: <names>` entry per label-typed
+// property, in JSON key order. Capacities' markdown frontmatter omits some statuses
+// and renders Complete as Done, so labels are read from the structured object.
+// Returns null when there are no label properties, so the output stays identical to
+// the markdown-only render. Always starts with "Labels:" — PA parses the markdown's
+// `^date:`/`^title:` lines and treats a `Note:` line as "incomplete".
+export function labelsLineFor(properties: unknown): string | null {
+  if (properties === null || typeof properties !== "object") return null;
+  const entries: string[] = [];
+  for (const [propId, value] of Object.entries(properties as Record<string, unknown>)) {
+    if (value === null || typeof value !== "object") continue;
+    const v = value as { type?: unknown; label?: unknown };
+    if (v.type !== "label") continue;
+    const options = Array.isArray(v.label) ? v.label : [];
+    const names = options
+      .map((o) => {
+        if (o === null || typeof o !== "object") return "";
+        const opt = o as { name?: unknown; id?: unknown };
+        if (typeof opt.name === "string" && opt.name !== "") return opt.name;
+        return typeof opt.id === "string" ? opt.id : "";
+      })
+      .filter((n) => n !== "");
+    entries.push(`${propId}: ${names.length > 0 ? names.join(", ") : "(none)"}`);
+  }
+  return entries.length > 0 ? `Labels: ${entries.join("; ")}` : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
   server.registerTool(
     "create_object",
@@ -899,15 +930,32 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
     {
       title: "Get Capacities Object (Markdown)",
       description:
-        "Read an object rendered as Markdown (YAML frontmatter of its properties + body).",
+        "Read an object rendered as Markdown (YAML frontmatter of its properties + body). A " +
+        "`Labels:` line before the markdown lists every label property (e.g. Status, Priority) " +
+        "read from the STRUCTURED object, as `<propertyId>: <Option>[, <Option>]` entries " +
+        "separated by `; ` (`(none)` when empty). Where it disagrees with the frontmatter, the " +
+        "Labels line is authoritative: Capacities' markdown render omits some statuses " +
+        "(e.g. Open Question, Backlog, On Hold) and shows Complete as Done.",
       inputSchema: {
         objectId: z.string().describe("objectId of the object to read")
       }
     },
     async ({ objectId }) => {
       try {
-        const obj = await client.getObjectMarkdown(objectId);
-        const header = obj.structureId ? `Structure: ${obj.structureId}\n\n` : "";
+        // Both reads are in the object bucket. The JSON read is fail-open: its
+        // error is rendered into the Labels line, never into the result (cap-ldk).
+        const [obj, labelsLine] = await Promise.all([
+          client.getObjectMarkdown(objectId),
+          client.getObject(objectId).then(
+            (structured) => labelsLineFor(structured?.properties),
+            // A JSON error body is kept multi-line (cap-dnf); fold it so the
+            // Labels line stays one line and no body text starts a line of its own.
+            (error) => `Labels: unavailable (${errorMessage(error).replace(/\s+/g, " ").trim()})`
+          )
+        ]);
+        let header = obj.structureId ? `Structure: ${obj.structureId}\n` : "";
+        if (labelsLine) header += `${labelsLine}\n`;
+        if (header) header += "\n";
         return {
           content: [{ type: "text", text: header + (obj.markdown ?? "") }]
         };
