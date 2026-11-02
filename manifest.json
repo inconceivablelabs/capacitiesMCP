@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "capacities-mcp-server",
   "display_name": "Capacities MCP Server",
-  "version": "2.2.3",
+  "version": "2.3.0",
   "description": "Capacities v2 knowledge management integration: search, object CRUD, weblink capture, and daily notes. Runs on the Capacities v2 REST API.",
   "author": {
     "name": "Tom Booth",
@@ -74,7 +74,7 @@
     },
     {
       "name": "get_object",
-      "description": "Read an object's content as markdown"
+      "description": "Read an object's content as markdown, plus a Labels line (e.g. Status, Priority) read from the structured object"
     },
     {
       "name": "append_to_object",
@@ -91,6 +91,14 @@
     {
       "name": "add_to_daily_note",
       "description": "Append markdown to today's daily note"
+    },
+    {
+      "name": "link_to_context",
+      "description": "Add a task to an object's Context by embedding it in that object's body (idempotent)"
+    },
+    {
+      "name": "unlink_from_context",
+      "description": "Remove a task from an object's Context by deleting every embed of it on that object"
     }
   ],
   "compatibility": {

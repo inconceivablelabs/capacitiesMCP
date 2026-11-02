@@ -42,12 +42,16 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
 #### Client Layer (`src/client/`)
 - **`capacities.ts` — CapacitiesClient**: thin transport over `fetch`. Methods: `getSpaces`,
   `getSpaceInfo`, `searchContent`, `createObject`, `updateObject`, `getObject`,
-  `getObjectMarkdown`, `appendBlocks`, `deleteObject`, `saveWeblink`, `saveToDailyNote`,
-  `enumerateObjects` (one page of `GET /objects/structure|tag`).
+  `getObjectMarkdown`, `appendBlocks`, `appendEntityBlock` (`POST /blocks/append` with a
+  `blocks:[{type:"EntityBlock", entityId}]` body), `deleteBlock` (`DELETE /block?objectId=&blockId=`),
+  `deleteObject`, `saveWeblink`, `saveToDailyNote`, `enumerateObjects` (one page of
+  `GET /objects/structure|tag`).
 - **`types.ts`**: interfaces for spaces, structures, property definitions (incl. `labelSet`,
   `multiple`, `allowedStructures`), objects, and options.
 - **Rate limiting** (per 60s window, client-side): `space` 10 · `search` 30 · `object` 30 ·
-  `blocks` 30 · `object/url` (weblink) 10 · `enumerate` (`/objects/structure|tag`) 30. When a window is exhausted the limiter **throws**
+  `blocks` (`/blocks/*` and `DELETE /block`) 30 · `object/url` (weblink) 10 · `enumerate`
+  (`/objects/structure|tag`) 30. `/block` contains neither `/blocks` nor `/object`, so it fell
+  through to the 10/min `space` bucket until cap-9cg classified it. When a window is exhausted the limiter **throws**
   `CapacitiesAPIError("RATE_LIMIT_EXCEEDED", …, {retryAfterMs})` rather than silently sleeping.
 
 #### Tools Layer (`src/tools/`)
@@ -86,7 +90,14 @@ search, structure introspection, and object CRUD — and lets the LLM compose th
   `AUTHENTICATION_FAILED` throws.
 - **`object.ts`**: `create_object`, `update_object`, `get_object`, `append_to_object`,
   `delete_object`. Also the shared, write-free helpers `buildWrappers` + `finalizeRelationPlans`
-  used by both create and update.
+  used by both create and update, and `labelsLineFor` (get_object's Labels line).
+- **`context.ts`**: `link_to_context`, `unlink_from_context` (cap-9cg). **A task's Context is
+  DERIVED, not a property:** it is the set of objects whose body embeds the task as an
+  EntityBlock. Link = append that embed to the target (read first; skipped if any embed already
+  exists, so it is idempotent; confirmed from the append response). Unlink = `DELETE /block` for
+  every embed found, sequentially, stopping at the first failure with the exact count removed.
+  The walk is `findEntityBlocks` in `utils/entity-blocks.ts`: every block field, nested `blocks`
+  at any depth (TextBlock/GroupBlock/GridBlock nest).
 - **`resolution.ts`**: `resolveEntities` — resolves relation NAMES → object ids by title search;
   classifies linked / unmatched / ambiguous; never guesses.
 - **`weblink.ts`**: `save_weblink` (`POST /object/url`, auto-fetch + title/description override).
@@ -131,7 +142,7 @@ Objects have two content layers, handled differently — this is the central men
 ### Available MCP Tools
 `search_content`, `find_objects`, `list_spaces`, `get_space_info`, `create_object`,
 `update_object`, `get_object`, `append_to_object`, `delete_object`, `save_weblink`,
-`add_to_daily_note`.
+`add_to_daily_note`, `link_to_context`, `unlink_from_context`.
 
 ### Error Handling
 - `CapacitiesAPIError(code, message, details)` — codes `RATE_LIMIT_EXCEEDED`,
@@ -197,6 +208,15 @@ Objects have two content layers, handled differently — this is the central men
   must mean incomplete, and informational lines must not start with it. Before changing the output
   format, grep personal-assistant for the tool name and run the real parser on the new output.
   (cap-1kc `e1cba05`, 2026-10-21.)
+- **`get_object` output contract (cap-ldk).** Line 1 is `Structure: <id>` (PA requires it first
+  when present); then, only if the object has label-typed properties, ONE line
+  `Labels: <propId>: <Name>[, <Name>]; <propId>: (none)` read from `GET /object` JSON, or
+  `Labels: unavailable (<error>)` if that read failed (fail-open, folded to one line); then a
+  blank line and the `/object/markdown` render **byte-for-byte**. PA's Python parses `^date:` /
+  `^title:` (MULTILINE) out of that markdown and Janet reads `status:` from its frontmatter, so
+  never rewrite it and never start an added line with `date:`, `title:` or `Note:`. The
+  frontmatter omits Open Question/Backlog/On Hold and shows Complete as `Done`; the Labels line
+  is the authoritative one.
 - **Never return `structuredContent` from a tool whose text an LLM must read; put machine-readable
   fields in a second text block.** Observed 2026-10-22 in Claude Code 2.1.305 via mcp-gateway: the
   model received only the structuredContent JSON and no `content[0].text`; the layer responsible
@@ -236,7 +256,7 @@ deps live in `server/node_modules`), `test-dist/`, and repo/agent state (`.beads
 folder kept out of git only by `.git/info/exclude` is NOT kept out of the pack: mcpb reads only
 `.mcpbignore` (cap-ul0: `.superpowers/sdd/` task briefs landed in a 2.2.1 repack, caught before
 commit). Verify after packing: `unzip -p capacities-desktop-extension.dxt manifest.json` shows
-`version` + 11 tools, and root-anchored paths match nothing:
+`version` + 13 tools, and root-anchored paths match nothing:
 `unzip -l <dxt> | awk '{print $4}' | grep -E '^(\.private-journal|\.beads|\.superpowers|test-dist|test|\.git|\.env|node_modules)(/|$)'`
 (a bare `/test/` pattern also matches dependencies' own test folders under `server/node_modules`).
 
