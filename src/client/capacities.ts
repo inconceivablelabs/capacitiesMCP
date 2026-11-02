@@ -153,7 +153,9 @@ export class CapacitiesClient {
     if (endpoint.includes("/objects/search")) return "search";
     if (/\/objects\/(structure|tag|collection)\b/.test(endpoint)) return "enumerate";
     if (endpoint.includes("/object/url")) return "weblink";
-    if (endpoint.includes("/blocks")) return "blocks";
+    // /block (singular, DELETE) has neither "/blocks" nor "/object" in it and
+    // used to fall through to the space bucket (cap-9cg).
+    if (endpoint.includes("/blocks") || /^\/block(\?|$)/.test(endpoint)) return "blocks";
     if (endpoint.includes("/object")) return "object";
     // /space and /space/structures
     return "space";
@@ -304,6 +306,25 @@ export class CapacitiesClient {
     });
   }
 
+  // Embeds `entityId` in `objectId`'s body as an EntityBlock (cap-9cg). Same
+  // endpoint as appendBlocks, but the `blocks` form: the spec requires exactly one
+  // of markdown/blocks, and a new block omits `id`. A 200 returns the full object
+  // (including blocks), which the caller uses to confirm the embed landed.
+  async appendEntityBlock(objectId: string, entityId: string): Promise<unknown> {
+    return this.makeRequest("/blocks/append", {
+      method: "POST",
+      body: JSON.stringify({ id: objectId, blocks: [{ type: "EntityBlock", entityId }] })
+    });
+  }
+
+  // Deletes one block (and its nested children) from an object (cap-9cg).
+  async deleteBlock(objectId: string, blockId: string): Promise<unknown> {
+    return this.makeRequest(
+      `/block?objectId=${encodeURIComponent(objectId)}&blockId=${encodeURIComponent(blockId)}`,
+      { method: "DELETE" }
+    );
+  }
+
   // Reads an object rendered as Markdown (YAML frontmatter of properties + body).
   // Distinct from getObject, which returns the STRUCTURED typed-wrapper form.
   async getObjectMarkdown(id: string): Promise<{ id: string; structureId: string; markdown: string }> {
@@ -357,7 +378,7 @@ class RateLimiter {
     search: { maxRequests: 30, windowMs: 60000 },  // /objects/search
     weblink: { maxRequests: 10, windowMs: 60000 }, // /object/url
     object: { maxRequests: 30, windowMs: 60000 },  // /object, /object/markdown
-    blocks: { maxRequests: 30, windowMs: 60000 },  // /blocks/*
+    blocks: { maxRequests: 30, windowMs: 60000 },  // /blocks/*, /block
     enumerate: { maxRequests: 30, windowMs: 60000 } // /objects/structure|tag|collection
   };
 

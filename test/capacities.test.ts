@@ -308,6 +308,10 @@ test("getEndpointType maps v2 paths to correct categories (incl. /object/url bef
   assert.equal(map("/object?id=abc&hardDelete=true"), "object");
   assert.equal(map("/object/markdown"), "object");
   assert.equal(map("/blocks/daily-note/append"), "blocks");
+  assert.equal(map("/blocks/append"), "blocks");
+  // cap-9cg: DELETE /block contains neither "/blocks" nor "/object" — it fell
+  // through to the space bucket (10/min) before the fix.
+  assert.equal(map("/block?objectId=o-1&blockId=b-1"), "blocks");
 });
 
 test("rate limiter enforces the v2 per-category limits", async () => {
@@ -846,4 +850,37 @@ test("makeRequest: a JSON 400 with U+FF02 inside a string reaches the message by
   installFetch(() => makeResponse({ ok: false, status: 400, text: json }));
   const err = await rejectionOf(newClient().getSpaces());
   assert.equal(err.message, `API error 400: ${json}`);
+});
+
+// --- cap-9cg: entity-block append + block delete --------------------------
+
+test("appendEntityBlock: POST /blocks/append with exactly {id, blocks:[{type:'EntityBlock', entityId}]}", async () => {
+  const returned = { id: "target-1", structureId: "person", properties: {}, blocks: {} };
+  const calls = installFetch(() => makeResponse({ body: returned }));
+  const client: any = newClient();
+
+  const res = await client.appendEntityBlock("target-1", "task-1");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://api.capacities.io/blocks/append");
+  assert.equal(calls[0].opts.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].opts.body), {
+    id: "target-1",
+    blocks: [{ type: "EntityBlock", entityId: "task-1" }]
+  });
+  assert.deepEqual(res, returned);
+  assert.equal(client.rateLimiter.windows.get("blocks").requests, 1, "spends the blocks bucket");
+});
+
+test("deleteBlock: DELETE /block?objectId=&blockId= (url-encoded) in the blocks bucket", async () => {
+  const calls = installFetch(() => makeResponse({ body: { id: "o 1" } }));
+  const client: any = newClient();
+
+  await client.deleteBlock("o 1", "b/1");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://api.capacities.io/block?objectId=o%201&blockId=b%2F1");
+  assert.equal(calls[0].opts.method, "DELETE");
+  assert.equal(client.rateLimiter.windows.get("blocks").requests, 1);
+  assert.equal(client.rateLimiter.windows.get("space"), undefined, "must not spend the space bucket");
 });
