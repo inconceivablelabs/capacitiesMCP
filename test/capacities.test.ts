@@ -869,7 +869,7 @@ test("appendEntityBlock: POST /blocks/append with exactly {id, blocks:[{type:'En
     blocks: [{ type: "EntityBlock", entityId: "task-1" }]
   });
   assert.deepEqual(res, returned);
-  assert.equal(client.rateLimiter.windows.get("blocks").requests, 1, "spends the blocks bucket");
+  assert.equal(client.rateLimiter.windows.get("blocks")?.requests, 1, "spends the blocks bucket");
 });
 
 test("deleteBlock: DELETE /block?objectId=&blockId= (url-encoded) in the blocks bucket", async () => {
@@ -881,6 +881,6 @@ test("deleteBlock: DELETE /block?objectId=&blockId= (url-encoded) in the blocks 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://api.capacities.io/block?objectId=o%201&blockId=b%2F1");
   assert.equal(calls[0].opts.method, "DELETE");
-  assert.equal(client.rateLimiter.windows.get("blocks").requests, 1);
+  assert.equal(client.rateLimiter.windows.get("blocks")?.requests, 1);
   assert.equal(client.rateLimiter.windows.get("space"), undefined, "must not spend the space bucket");
 });
