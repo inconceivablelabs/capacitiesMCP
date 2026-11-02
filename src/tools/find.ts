@@ -82,7 +82,7 @@ export function setupFindTools(server: McpServer, client: CapacitiesClient) {
         tag: z.string().optional().describe(
           "Optional. A tag NAME; lists objects of this structure carrying the tag (combine with title_hint to filter their titles)."
         ),
-        filters: z.record(filterValueSchema).optional().describe(
+        filters: z.record(z.string(), filterValueSchema).optional().describe(
           "Client-side filters keyed by property NAME or id. Date: ISO string (equals) or {after,before} (ISO range). Label: option NAME. Relation/tag: object NAME. Scalars: equals."
         ),
         sort: z.object({

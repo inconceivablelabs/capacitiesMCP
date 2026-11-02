@@ -471,17 +471,17 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
           .describe("Structure id (UUID or built-in id like RootTask) from get_space_info"),
         title: z.string().describe("Title of the new object"),
         properties: z
-          .record(z.union([z.string(), z.number(), z.boolean()]))
+          .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
           .optional()
           .describe(
             "Scalar props keyed by property NAME or id: text/url/number/boolean/date. Date = ISO-8601 string."
           ),
         labels: z
-          .record(z.union([z.string(), z.array(z.string())]))
+          .record(z.string(), z.union([z.string(), z.array(z.string())]))
           .optional()
           .describe("Label props keyed by property NAME or id; value(s) are option NAME(s)"),
         relations: z
-          .record(z.union([z.string(), z.array(z.string())]))
+          .record(z.string(), z.union([z.string(), z.array(z.string())]))
           .optional()
           .describe("Entity (relation) props keyed by property NAME or id; value(s) are entity NAME(s), resolved strictly"),
         create_missing_relations: z
@@ -656,17 +656,17 @@ export function setupObjectTools(server: McpServer, client: CapacitiesClient) {
         objectId: z.string().describe("objectId of the object to update"),
         title: z.string().optional().describe("New title for the object"),
         properties: z
-          .record(z.union([z.string(), z.number(), z.boolean()]))
+          .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
           .optional()
           .describe(
             "Scalar props keyed by property NAME or id: text/url/number/boolean/date. REPLACES each named value."
           ),
         labels: z
-          .record(z.union([z.string(), z.array(z.string())]))
+          .record(z.string(), z.union([z.string(), z.array(z.string())]))
           .optional()
           .describe("Label props keyed by property NAME or id; value(s) are option NAME(s). REPLACES the named prop."),
         relations: z
-          .record(z.union([z.string(), z.array(z.string())]))
+          .record(z.string(), z.union([z.string(), z.array(z.string())]))
           .optional()
           .describe("Entity (relation) props keyed by property NAME or id; value(s) are entity NAME(s). REPLACES the named prop."),
         create_missing_relations: z
